@@ -1,0 +1,63 @@
+# Nokube-rs
+
+分布式服务管理器的 Rust 实现
+
+## 功能特性
+
+### 配置管理 (config)
+- etcd 集群配置存储
+- 集群配置管理
+- 节点配置管理
+
+### 监控系统 (agent/general/exporter)
+- 系统指标收集 (CPU, 内存, 网络)
+- GreptimeDB 数据存储
+- Grafana 监控面板
+
+### 代理系统 (agent)
+- 通用代理功能
+- 主代理 (Master Agent)
+- 远程命令执行
+- 依赖安装管理
+
+### 部署控制 (remote_ctl)
+- SSH 管理器
+- 分布式部署控制器
+- 集群节点管理
+- 服务部署
+
+## 使用方法
+
+### 初始化集群
+```bash
+nokube init --cluster-name my-cluster
+```
+
+### 部署或更新集群
+```bash
+nokube new-or-update --cluster-name my-cluster
+```
+
+### 启动监控
+```bash
+nokube monitor --cluster-name my-cluster
+```
+
+## 架构设计
+
+遵循最小变更原则，文件分布即模块规划分布:
+
+- `src/config/` - 配置管理模块
+- `src/agent/` - 代理系统模块
+  - `general/` - 通用功能
+  - `master_agent/` - 主代理功能
+- `src/remote_ctl/` - 远程部署控制模块
+
+## 依赖
+
+- etcd-rs - etcd 客户端
+- ssh2 - SSH 连接管理  
+- tokio - 异步运行时
+- serde - 序列化/反序列化
+- tracing - 日志系统
+- reqwest - HTTP 客户端

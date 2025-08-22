@@ -1,0 +1,35 @@
+{
+  "apt_packages": [
+    "protobuf-compiler",
+    "build-essential",
+    "pkg-config",
+    "libssl-dev",
+    "curl",
+    "git",
+    "ca-certificates",
+    "gnupg",
+    "lsb-release"
+  ],
+  "pip_packages": [
+    "requests",
+    "pyyaml"
+  ],
+  "hash": "e604ba94c6ec3c272d153ff37fe453572bcd94359b331e928daef1c406220f46",
+  "cached_deps_order": {
+    "apt_packages": [
+      "build-essential",
+      "ca-certificates",
+      "curl",
+      "git",
+      "gnupg",
+      "libssl-dev",
+      "lsb-release",
+      "pkg-config",
+      "protobuf-compiler"
+    ],
+    "pip_packages": [
+      "pyyaml",
+      "requests"
+    ]
+  }
+}

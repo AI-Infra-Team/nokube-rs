@@ -1,0 +1,33 @@
+[package]
+name = "nokube-rs"
+version = "0.1.0"
+edition = "2021"
+authors = ["AI-Infra-Team"]
+description = "Distributed service manager in Rust"
+license = "MIT"
+
+[dependencies]
+base64 = "0.21"
+tokio = { version = "1.0", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9"
+etcd-rs = "1.0"
+tonic = "0.9"
+prost = "0.11"
+thiserror = "1.0"
+anyhow = "1.0"
+clap = { version = "4.0", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+ssh2 = "0.9"
+reqwest = { version = "0.11", features = ["json"] }
+chrono = { version = "0.4", features = ["serde"] }
+tabled = "0.14"
+
+[build-dependencies]
+tonic-build = "0.9"
+
+[[bin]]
+name = "nokube"
+path = "src/main.rs"

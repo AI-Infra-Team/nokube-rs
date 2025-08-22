@@ -1,0 +1,53 @@
+cluster_name: home-cluster
+
+# 分布式任务管理配置
+task_spec:
+  # 任务管理器版本
+  version: "1.0"
+  
+  # 监控配置
+  monitoring:
+    grafana:
+      port: 3000
+    greptimedb:
+      port: 4000
+    enabled: true
+
+# 节点列表
+nodes:
+  - ssh_url: "10.126.126.233:22"
+    name: "pa-SER7"  # 实际系统看到的节点名
+    role: "head"
+    storage:
+      type: "local"
+      path: "/opt/nokube/data/ray/head"
+    users:
+      - userid: "pa"
+        password: "74123"
+    proxy:
+      http_proxy: "http://10.126.126.233:20122"
+      https_proxy: "http://10.126.126.233:20122"
+      no_proxy: "localhost,127.0.0.1,10.0.0.0/8,192.168.0.0/16"
+
+  - ssh_url: "10.126.126.232:22"
+    name: "pa-huan14"   # 实际系统看到的节点名
+    role: "worker"
+    storage:
+      type: "local"
+      path: "/opt/nokube/data/ray/worker-1"
+    users:
+      - userid: "pa"
+        password: "74123"
+    proxy:
+      http_proxy: "http://10.126.126.233:20122"
+      https_proxy: "http://10.126.126.233:20122"
+      no_proxy: "localhost,127.0.0.1,10.0.0.0/8,192.168.0.0/16"
+
+# NoKube 特定配置
+nokube_config:
+  # 日志配置
+  log_level: "INFO"
+  # 监控指标收集间隔(秒)
+  metrics_interval: 30
+  # 配置轮询间隔(秒)
+  config_poll_interval: 10

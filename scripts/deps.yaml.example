@@ -1,0 +1,77 @@
+# Universal Docker Build Configuration
+# This file contains all configurable options for the docker_build.py script
+# Copy this to deps.yaml and customize for your project
+
+# Project configuration
+project:
+  name: "nokube"              # Project name (used for container/image naming)
+  type: "rust"                # Project type: rust, nodejs, python, go, etc.
+  main_executable: "nokube"   # Name of the main executable/entry point
+
+# System/Base configuration
+system:
+  base_image: "ubuntu:18.04"  # Base Docker image
+  rust_version: "1.70.0"      # Language version (for Rust projects)
+  # nodejs_version: "18"      # Uncomment for Node.js projects
+  # python_version: "3.9"     # Uncomment for Python projects
+
+# Dependencies to install in the container
+apt_packages:
+  - "htop"
+  - "iotop" 
+  - "net-tools"
+  - "vim"
+
+pip_packages:
+  - "psutil"
+  - "requests"
+
+# Build configuration
+build:
+  # Files to copy for dependency caching (copied before source code)
+  dependencies:
+    - "Cargo.toml"
+    - "Cargo.lock"
+    - "build.rs"
+  
+  # Runtime stage configuration
+  runtime:
+    image: "ubuntu:18.04"     # Runtime base image (can be different/smaller)
+    packages:                 # Minimal packages needed at runtime
+      - "ca-certificates"
+      - "libssl1.1"
+
+# Example configurations for other project types:
+
+# For Node.js projects:
+# project:
+#   name: "my-nodejs-app"
+#   type: "nodejs"
+#   main_executable: "index.js"
+# system:
+#   base_image: "node:18-alpine"
+#   nodejs_version: "18"
+# build:
+#   dependencies:
+#     - "package.json"
+#     - "package-lock.json"
+#   runtime:
+#     image: "node:18-alpine"
+#     packages: []
+
+# For Python projects:
+# project:
+#   name: "my-python-app"
+#   type: "python"
+#   main_executable: "app.py"
+# system:
+#   base_image: "python:3.9-slim"
+#   python_version: "3.9"
+# build:
+#   dependencies:
+#     - "requirements.txt"
+#     - "setup.py"
+#   runtime:
+#     image: "python:3.9-slim"
+#     packages:
+#       - "python3"
