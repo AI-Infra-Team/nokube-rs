@@ -51,7 +51,14 @@ impl ServiceModeAgent {
     }
 
     pub async fn run(&mut self) -> Result<()> {
-        info!("Starting service mode agent");
+        let current_user = std::env::var("USER").unwrap_or_else(|_| "unknown".to_string());
+        
+        info!("=== NoKube Service Agent Starting ===");
+        info!("Node Name: {}", self.node_id);
+        info!("Cluster: {}", self.cluster_name);
+        info!("Operating User: {}", current_user);
+        info!("=====================================");
+        
         self.initialize_exporter().await?;
         if let Some(exporter) = &self.exporter {
             exporter.start_with_etcd_polling().await?;

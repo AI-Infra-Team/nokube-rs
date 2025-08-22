@@ -1,17 +1,16 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum DeployStatus {
     Pending,
     Finished,
 }
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClusterMeta {
     pub cluster_name: String,
     pub config: ClusterConfig,
     pub deploy_status: DeployStatus,
 }
-use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClusterConfig {
@@ -94,6 +93,17 @@ pub struct NokubeSpecificConfig {
     pub log_level: Option<String>,
     pub metrics_interval: Option<u64>,
     pub config_poll_interval: Option<u64>,
+}
+
+impl NodeConfig {
+    /// 从 SSH URL 中提取节点的 IP 地址
+    /// 例如: "192.168.1.100:22" -> "192.168.1.100"
+    pub fn get_ip(&self) -> anyhow::Result<&str> {
+        self.ssh_url
+            .split(':')
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("Invalid SSH URL format: {}", self.ssh_url))
+    }
 }
 
 impl ClusterConfig {

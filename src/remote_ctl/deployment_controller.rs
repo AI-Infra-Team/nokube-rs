@@ -69,7 +69,7 @@ impl DeploymentController {
         {
             let greptimedb_endpoint = format!(
                 "http://{}:{}",
-                head_node.ssh_url.split(':').next().unwrap_or("localhost"),
+                head_node.get_ip()?,
                 cluster_config.task_spec.monitoring.greptimedb.port
             );
 
@@ -265,7 +265,7 @@ echo "Dependencies installed successfully"
                 .iter()
                 .find(|n| matches!(n.role, crate::config::cluster_config::NodeRole::Head))
             {
-                let host = head_node.ssh_url.split(':').next().unwrap_or("localhost");
+                let host = head_node.get_ip()?;
                 let grafana_url = format!("http://{}:{}", host, grafana_port);
                 rows.push(ServiceRow {
                     name: "grafana",
@@ -278,6 +278,23 @@ echo "Dependencies installed successfully"
                     name: "greptimedb",
                     url: greptimedb_url,
                 });
+
+                // 实际重启绑定服务 - 按照 .cursorrules 的要求
+                info!("Stopping and restarting bound services (grafana, greptimedb) with updated configurations...");
+                
+                // 创建 GrafanaManager 并重新配置
+                let greptimedb_endpoint = format!("http://{}:{}", host, greptimedb_port);
+                let grafana_manager = GrafanaManager::new(grafana_port, greptimedb_endpoint);
+                
+                // 先停止现有的 Grafana 服务
+                if let Err(e) = grafana_manager.stop_grafana().await {
+                    tracing::warn!("Failed to stop existing Grafana service: {}", e);
+                }
+                
+                // 重新启动 Grafana 并配置数据源
+                grafana_manager.setup_grafana(&cluster_config.cluster_name).await?;
+                
+                info!("Successfully restarted and reconfigured Grafana with updated node IP: {}", host);
             }
         }
 
@@ -285,8 +302,6 @@ echo "Dependencies installed successfully"
             let table = Table::new(rows).to_string();
             info!("\n{}", table);
         }
-
-        info!("Note: Services should be managed separately from cluster configuration");
 
         Ok(())
     }

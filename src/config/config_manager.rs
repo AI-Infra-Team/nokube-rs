@@ -14,16 +14,24 @@ pub struct NokubeConfig {
 
 pub struct ConfigManager {
     etcd_manager: EtcdManager,
+    etcd_endpoints: Vec<String>,
 }
 
 impl ConfigManager {
     pub async fn get_cluster_config(&self, cluster_name: &str) -> Result<Option<ClusterConfig>> {
         self.etcd_manager.get_cluster_config(cluster_name).await
     }
+
+    pub fn get_etcd_endpoints(&self) -> Vec<String> {
+        self.etcd_endpoints.clone()
+    }
     pub async fn new() -> Result<Self> {
         let config = Self::load_nokube_config()?;
-        let etcd_manager = EtcdManager::new(config.etcd_endpoints).await?;
-        Ok(Self { etcd_manager })
+        let etcd_manager = EtcdManager::new(config.etcd_endpoints.clone()).await?;
+        Ok(Self { 
+            etcd_manager,
+            etcd_endpoints: config.etcd_endpoints,
+        })
     }
 
     fn load_nokube_config() -> Result<NokubeConfig> {

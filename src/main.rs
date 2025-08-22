@@ -34,6 +34,8 @@ enum Commands {
     AgentService {
         #[arg(short, long)]
         config_path: String,
+        #[arg(long)]
+        extra_params: Option<String>,
     },
 }
 use clap::{Parser, Subcommand};
@@ -63,7 +65,7 @@ async fn main() -> Result<()> {
         Commands::NewOrUpdate { config_file } => handle_new_or_update(config_file).await,
         Commands::Monitor { cluster_name } => handle_monitor(cluster_name).await,
         Commands::AgentCommand { config_path, extra_params } => handle_agent_command(config_path, extra_params).await,
-        Commands::AgentService { config_path } => handle_agent_service(config_path).await,
+        Commands::AgentService { config_path, extra_params } => handle_agent_service(config_path, extra_params).await,
     };
 
     if let Err(e) = &result {
@@ -214,15 +216,21 @@ async fn handle_agent_command(config_path: String, extra_params: Option<String>)
     Ok(())
 }
 
-async fn handle_agent_service(config_path: String) -> Result<()> {
+async fn handle_agent_service(config_path: String, extra_params: Option<String>) -> Result<()> {
     info!("Starting agent service with config: {}", config_path);
-    let cluster_name = match std::fs::read_to_string(&config_path) {
-        Ok(content) => match serde_yaml::from_str::<config::cluster_config::ClusterConfig>(&content) {
-            Ok(cfg) => cfg.cluster_name.clone(),
-            Err(_) => "default".to_string(),
-        },
-        Err(_) => "default".to_string(),
-    };
+    let cluster_name = extra_params.as_ref()
+        .and_then(|params_b64| {
+            base64::engine::general_purpose::STANDARD.decode(params_b64).ok()
+                .and_then(|params_json| String::from_utf8(params_json).ok())
+                .and_then(|params_str| serde_json::from_str::<serde_json::Value>(&params_str).ok())
+                .and_then(|params| params.get("cluster_name").and_then(|v| v.as_str()).map(|s| s.to_string()))
+        })
+        .or_else(|| {
+            std::fs::read_to_string(&config_path).ok()
+                .and_then(|content| serde_yaml::from_str::<config::cluster_config::ClusterConfig>(&content).ok())
+                .map(|cfg| cfg.cluster_name.clone())
+        })
+        .unwrap_or_else(|| "default".to_string());
 
     let config_manager = ConfigManager::new().await
         .map_err(|e| {
@@ -250,8 +258,28 @@ async fn handle_agent_service(config_path: String) -> Result<()> {
         }
     };
 
-    let node_id = std::env::var("NOKUBE_NODE_ID").unwrap_or_else(|_| "default-node".to_string());
-    let etcd_endpoints = vec!["127.0.0.1:2379".to_string()];
+    // 从 ConfigManager 获取正确的 etcd 地址，而不是硬编码
+    let etcd_endpoints = config_manager.get_etcd_endpoints();
+    
+    // 尝试从集群配置中获取当前节点的名称，而不是使用默认值
+    let node_id = std::env::var("NOKUBE_NODE_ID")
+        .or_else(|_| {
+            // 尝试根据当前主机IP或主机名匹配集群配置中的节点
+            if let Ok(hostname) = std::env::var("HOSTNAME") {
+                for node in &cluster_config.nodes {
+                    if node.name.contains(&hostname) || hostname.contains(&node.name) {
+                        return Ok(node.name.clone());
+                    }
+                }
+            }
+            // 如果有节点配置，使用第一个节点名作为fallback
+            if let Some(first_node) = cluster_config.nodes.first() {
+                Ok(first_node.name.clone())
+            } else {
+                Err(std::env::VarError::NotPresent)
+            }
+        })
+        .unwrap_or_else(|_| "default-node".to_string());
     let mut service_agent = ServiceModeAgent::new(
         node_id,
         cluster_name.to_string(),

@@ -183,6 +183,22 @@ impl CommandModeAgent {
     async fn setup_systemctl_service(&self) -> Result<()> {
         info!("Setting up systemctl service");
 
+        // 获取当前用户信息（从环境变量或配置中）
+        let current_user = std::env::var("USER").unwrap_or_else(|_| "pa".to_string());
+        let home_dir = std::env::var("HOME").unwrap_or_else(|_| format!("/home/{}", current_user));
+        
+        // 使用用户级别的配置路径
+        let config_path = format!("{}/.nokube/config.yaml", home_dir);
+
+        // 创建包含cluster_name的extra_params，与command mode保持一致性
+        let cluster_params = serde_json::json!({
+            "cluster_name": self.config.cluster_name
+        });
+        let extra_params = base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            cluster_params.to_string().as_bytes()
+        );
+
         let service_content = format!(
             r#"[Unit]
 Description=Nokube Agent Service
@@ -190,15 +206,24 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/opt/nokube-agent/nokube agent-service --config-path /etc/nokube/config.json
+ExecStart=/opt/nokube-remote-lib/nokube agent-service --config-path {} --extra-params {}
+Environment=LD_LIBRARY_PATH=/opt/nokube-remote-lib
+Environment=HOME={}
 Restart=always
 RestartSec=5
-User=root
-WorkingDirectory=/opt/nokube-agent
+User={}
+Group={}
+WorkingDirectory={}
 
 [Install]
 WantedBy=multi-user.target
-"#
+"#,
+            config_path,
+            extra_params,
+            home_dir,
+            current_user,
+            current_user,
+            home_dir
         );
 
         std::fs::write("/etc/systemd/system/nokube-agent.service", service_content)?;
