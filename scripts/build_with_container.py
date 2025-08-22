@@ -42,23 +42,12 @@ class ContainerBuilder:
         """Ensure build image exists by calling prepare_build_img.py"""
         print("Ensuring build image exists...")
         try:
-            result = subprocess.run([
+            # Run without capturing output for real-time progress
+            subprocess.run([
                 "python3", "prepare_build_img.py"
-            ], cwd=self.scripts_dir, check=True, capture_output=True, text=True)
+            ], cwd=self.scripts_dir, check=True)
             
-            # Extract image name from output
-            for line in result.stdout.split('\n'):
-                if 'Using existing image:' in line or 'Build completed' in line:
-                    if ':' in line:
-                        image_name = line.split(':')[-1].strip()
-                        if image_name.endswith('latest'):
-                            # Extract full image name
-                            parts = line.split()
-                            for part in parts:
-                                if 'build:latest' in part:
-                                    return part
-            
-            # Fallback: try to find the image
+            # Since we're not capturing output, need to find the image directly
             result = subprocess.run([
                 "docker", "images", "--format", "{{.Repository}}:{{.Tag}}"
             ], capture_output=True, text=True, check=True)
@@ -71,10 +60,6 @@ class ContainerBuilder:
             
         except subprocess.CalledProcessError as e:
             print(f"Failed to prepare build image: {e}")
-            if e.stdout:
-                print("STDOUT:", e.stdout)
-            if e.stderr:
-                print("STDERR:", e.stderr)
             raise
     
     def _container_running(self, container_name: str) -> bool:
@@ -147,6 +132,7 @@ class ContainerBuilder:
         # Change to app directory and build with real-time output
         try:
             cmd = ["docker", "exec"] + env_args + [container_name, "bash", "-c", "echo 'Environment variables:' && env | grep -i proxy; cd /app && cargo build --release"]
+            # Run without capturing output to show real-time progress
             subprocess.run(cmd, check=True)
             print("Build completed successfully")
         except subprocess.CalledProcessError as e:
