@@ -46,6 +46,9 @@ pub enum NokubeError {
 
     #[error("Dependency installation failed: {dependency}: {reason}")]
     DependencyInstallationFailed { dependency: String, reason: String },
+
+    #[error("File operation failed on {file_path}: {reason}")]
+    FileOperation { file_path: String, reason: String },
 }
 
 pub type Result<T> = std::result::Result<T, NokubeError>;

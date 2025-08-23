@@ -117,12 +117,6 @@ impl DeploymentController {
     }
 
     async fn prepare_dependencies(&self) -> Result<()> {
-        // 复制 libcrypto.so.1.1 到待上传目录（如存在）
-        let libcrypto_src = "target/libcrypto.so.1.1";
-        let libcrypto_dst = "/tmp/nokube-remote-lib/libcrypto.so.1.1";
-        if std::path::Path::new(libcrypto_src).exists() {
-            std::fs::copy(libcrypto_src, libcrypto_dst)?;
-        }
         info!("Preparing binary dependencies and resources");
 
         // This would involve:
@@ -130,15 +124,26 @@ impl DeploymentController {
         // 2. Preparing installation scripts
         // 3. Packaging remote_lib for distribution
 
-        // Create remote_lib directory structure
-        std::fs::create_dir_all("/tmp/nokube-remote-lib")?;
+        // Create remote_lib directory structure FIRST
+        std::fs::create_dir_all("/tmp/nokube-remote-lib")
+            .map_err(|e| anyhow::anyhow!("Failed to create directory /tmp/nokube-remote-lib: {}", e))?;
+
+        // 复制 libcrypto.so.1.1 到待上传目录（如存在）
+        let libcrypto_src = "target/libcrypto.so.1.1";
+        let libcrypto_dst = "/tmp/nokube-remote-lib/libcrypto.so.1.1";
+        if std::path::Path::new(libcrypto_src).exists() {
+            std::fs::copy(libcrypto_src, libcrypto_dst)
+                .map_err(|e| anyhow::anyhow!("Failed to copy {} to {}: {}", libcrypto_src, libcrypto_dst, e))?;
+        }
         // 复制二进制文件到待上传目录
-        std::fs::copy("target/nokube", "/tmp/nokube-remote-lib/nokube")?;
+        std::fs::copy("target/nokube", "/tmp/nokube-remote-lib/nokube")
+            .map_err(|e| anyhow::anyhow!("Failed to copy target/nokube to /tmp/nokube-remote-lib/nokube: {}", e))?;
         // 复制 libssl.so.1.1 到待上传目录（如存在）
         let libssl_src = "target/libssl.so.1.1";
         let libssl_dst = "/tmp/nokube-remote-lib/libssl.so.1.1";
         if std::path::Path::new(libssl_src).exists() {
-            std::fs::copy(libssl_src, libssl_dst)?;
+            std::fs::copy(libssl_src, libssl_dst)
+                .map_err(|e| anyhow::anyhow!("Failed to copy {} to {}: {}", libssl_src, libssl_dst, e))?;
         }
 
         // Create dependency installation script
@@ -161,7 +166,7 @@ echo "Dependencies installed successfully"
         std::fs::write(
             "/tmp/nokube-remote-lib/install_dependencies.py",
             install_script,
-        )?;
+        ).map_err(|e| anyhow::anyhow!("Failed to write install script to /tmp/nokube-remote-lib/install_dependencies.py: {}", e))?;
 
         info!("Dependencies prepared");
         Ok(())
@@ -187,7 +192,8 @@ echo "Dependencies installed successfully"
                 let remote_config_path = "/home/pa/.nokube/config.yaml"; // 可根据目标用户调整
                 ssh_manager
                     .upload_file("/home/pa/.nokube/config.yaml", remote_config_path)
-                    .await?;
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to upload config file /home/pa/.nokube/config.yaml to {}: {}", remote_config_path, e))?;
 
                 // 构造参数对象并 base64 编码
                 let extra_params = json!({
@@ -226,7 +232,8 @@ echo "Dependencies installed successfully"
             if let Some(ssh_manager) = self.ssh_managers.get(host) {
                 // Create node configuration file
                 let node_config_json = serde_json::to_string_pretty(node)?;
-                std::fs::write("/tmp/node_config.json", node_config_json)?;
+                std::fs::write("/tmp/node_config.json", node_config_json)
+                    .map_err(|e| anyhow::anyhow!("Failed to write node config to /tmp/node_config.json: {}", e))?;
 
                 // Upload configuration
                 ssh_manager
