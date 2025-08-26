@@ -11,6 +11,11 @@ import argparse
 from pathlib import Path
 
 
+def sudo_prefix() -> list:
+    """Return [sudo, -E] if not running as root, empty list otherwise."""
+    return ["sudo", "-E"] if os.geteuid() != 0 else []
+
+
 def main():
     os.chdir(Path(__file__).absolute().parent)
     parser = argparse.ArgumentParser(description="Build with container and copy output")
@@ -48,9 +53,9 @@ class ContainerBuilder:
             ], cwd=self.scripts_dir, check=True)
             
             # Since we're not capturing output, need to find the image directly
-            result = subprocess.run([
-                "docker", "images", "--format", "{{.Repository}}:{{.Tag}}"
-            ], capture_output=True, text=True, check=True)
+            result = subprocess.run(
+                sudo_prefix() + ["docker", "images", "--format", "{{.Repository}}:{{.Tag}}"],
+                capture_output=True, text=True, check=True)
             
             for line in result.stdout.split('\n'):
                 if 'build:latest' in line:
@@ -65,10 +70,10 @@ class ContainerBuilder:
     def _container_running(self, container_name: str) -> bool:
         """Check if build container is running."""
         try:
-            result = subprocess.run([
-                "docker", "ps", "--filter", f"name={container_name}", 
-                "--format", "{{.Names}}"
-            ], capture_output=True, text=True, check=True)
+            result = subprocess.run(
+                sudo_prefix() + ["docker", "ps", "--filter", f"name={container_name}", 
+                "--format", "{{.Names}}"],
+                capture_output=True, text=True, check=True)
             return container_name in result.stdout
         except subprocess.CalledProcessError:
             return False
@@ -76,14 +81,14 @@ class ContainerBuilder:
     def _stop_and_remove_container(self, container_name: str) -> None:
         """Stop and remove existing container."""
         try:
-            subprocess.run(["docker", "stop", container_name], 
+            subprocess.run(sudo_prefix() + ["docker", "stop", container_name], 
                           capture_output=True, check=True)
             print(f"Stopped existing container: {container_name}")
         except subprocess.CalledProcessError:
             pass
         
         try:
-            subprocess.run(["docker", "rm", container_name], 
+            subprocess.run(sudo_prefix() + ["docker", "rm", container_name], 
                           capture_output=True, check=True)
             print(f"Removed existing container: {container_name}")
         except subprocess.CalledProcessError:
@@ -97,7 +102,7 @@ class ContainerBuilder:
             "-v", f"{self.output_dir}:/output"
         ]
         
-        cmd = [
+        cmd = sudo_prefix() + [
             "docker", "run", "-d", "--name", container_name
         ] + mount_args + [image_name]
         
@@ -106,7 +111,7 @@ class ContainerBuilder:
     
     def _exec_in_container(self, container_name: str, command: list) -> subprocess.CompletedProcess:
         """Execute a command inside the container."""
-        cmd = ["docker", "exec", container_name] + command
+        cmd = sudo_prefix() + ["docker", "exec", container_name] + command
         return subprocess.run(cmd, check=True, capture_output=True, text=True)
     
     def _build_in_container(self, container_name: str) -> None:
@@ -131,7 +136,7 @@ class ContainerBuilder:
         
         # Change to app directory and build with real-time output
         try:
-            cmd = ["docker", "exec"] + env_args + [container_name, "bash", "-c", "echo 'Environment variables:' && env | grep -i proxy; cd /app && cargo build --release"]
+            cmd = sudo_prefix() + ["docker", "exec"] + env_args + [container_name, "bash", "-c", "echo 'Environment variables:' && env | grep -i proxy; cd /app && cargo build --release"]
             # Run without capturing output to show real-time progress
             subprocess.run(cmd, check=True)
             print("Build completed successfully")

@@ -131,7 +131,7 @@ impl ClusterConfig {
         self.nodes.push(node);
     }
 
-    pub fn add_service(&mut self, service: ServiceConfig) {
+    pub fn add_service(&mut self, _service: ServiceConfig) {
         // services will be handled separately as they're not part of the cluster config
     }
 }

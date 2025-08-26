@@ -15,8 +15,8 @@ enum Commands {
     },
     /// Create or update cluster deployment
     NewOrUpdate {
-        /// Path to cluster configuration YAML file
-        config_file: String,
+        /// Path to cluster configuration YAML file (optional, will create template if not provided)
+        config_file: Option<String>,
     },
     /// Start monitoring services
     Monitor {
@@ -97,7 +97,20 @@ async fn handle_init(cluster_name: String) -> Result<()> {
     }
 }
 
-async fn handle_new_or_update(config_file: String) -> Result<()> {
+async fn handle_new_or_update(config_file: Option<String>) -> Result<()> {
+    // 如果没有提供配置文件，创建模板
+    let config_file = match config_file {
+        Some(file) => file,
+        None => {
+            // 创建配置模板
+            let template_path = "cluster-config-template.yaml";
+            create_config_template(template_path)?;
+            info!("Config template created at: {}", template_path);
+            info!("Please edit the template file and run: nokube new-or-update {}", template_path);
+            return Ok(());
+        }
+    };
+
     info!("Deploying/updating cluster from config: {}", config_file);
     let cluster_config = match read_cluster_config_from_file(&config_file).await {
         Ok(config) => config,
@@ -167,13 +180,17 @@ async fn handle_monitor(cluster_name: String) -> Result<()> {
 
 async fn handle_agent_command(config_path: String, extra_params: Option<String>) -> Result<()> {
     info!("Running agent in command mode with config: {}", config_path);
-    let cluster_name = extra_params.as_ref()
+    
+    // 解析额外参数
+    let parsed_params = extra_params.as_ref()
         .and_then(|params_b64| {
             base64::engine::general_purpose::STANDARD.decode(params_b64).ok()
                 .and_then(|params_json| String::from_utf8(params_json).ok())
                 .and_then(|params_str| serde_json::from_str::<serde_json::Value>(&params_str).ok())
-                .and_then(|params| params.get("cluster_name").and_then(|v| v.as_str()).map(|s| s.to_string()))
-        })
+        });
+    
+    let cluster_name = parsed_params.as_ref()
+        .and_then(|params| params.get("cluster_name").and_then(|v| v.as_str()).map(|s| s.to_string()))
         .or_else(|| {
             std::fs::read_to_string(&config_path).ok()
                 .and_then(|content| serde_yaml::from_str::<config::cluster_config::ClusterConfig>(&content).ok())
@@ -207,7 +224,7 @@ async fn handle_agent_command(config_path: String, extra_params: Option<String>)
         }
     };
 
-    let command_agent = CommandModeAgent::new(cluster_config);
+    let command_agent = CommandModeAgent::new(cluster_config, parsed_params);
     command_agent.execute().await.map_err(|e| {
         error!("Command mode agent failed: {}", e);
         NokubeError::Agent(format!("Command mode execution failed: {}", e))
@@ -306,4 +323,66 @@ async fn read_cluster_config_from_file(file_path: &str) -> Result<ClusterConfig>
     
     info!("Successfully loaded cluster config for: {}", cluster_config.cluster_name);
     Ok(cluster_config)
+}
+
+fn create_config_template(template_path: &str) -> Result<()> {
+    let template_content = r#"cluster_name: my-cluster
+
+# 分布式任务管理配置
+task_spec:
+  # 任务管理器版本
+  version: "1.0"
+  
+  # 监控配置
+  monitoring:
+    grafana:
+      port: 3000
+    greptimedb:
+      port: 4000
+    enabled: true
+
+# 节点列表
+nodes:
+  - ssh_url: "10.0.0.1:22"
+    name: "head-node"  # 实际系统看到的节点名
+    role: "head"
+    storage:
+      type: "local"
+      path: "/opt/nokube/data/ray/head"
+    users:
+      - userid: "your-username"
+        password: "your-password"
+    proxy:
+      http_proxy: "http://proxy.example.com:8080"
+      https_proxy: "http://proxy.example.com:8080"
+      no_proxy: "localhost,127.0.0.1,10.0.0.0/8,192.168.0.0/16"
+
+  - ssh_url: "10.0.0.2:22"
+    name: "worker-node-1"   # 实际系统看到的节点名
+    role: "worker"
+    storage:
+      type: "local"
+      path: "/opt/nokube/data/ray/worker-1"
+    users:
+      - userid: "your-username"
+        password: "your-password"
+    proxy:
+      http_proxy: "http://proxy.example.com:8080"
+      https_proxy: "http://proxy.example.com:8080"
+      no_proxy: "localhost,127.0.0.1,10.0.0.0/8,192.168.0.0/16"
+
+# NoKube 特定配置
+nokube_config:
+  # 日志配置
+  log_level: "INFO"
+  # 监控指标收集间隔(秒)
+  metrics_interval: 30
+  # 配置轮询间隔(秒)
+  config_poll_interval: 10
+"#;
+
+    fs::write(template_path, template_content)
+        .map_err(|e| NokubeError::Config(format!("Failed to create template file {}: {}", template_path, e)))?;
+    
+    Ok(())
 }

@@ -15,6 +15,11 @@ from pathlib import Path
 from typing import Dict, List, Set, Tuple
 
 
+def sudo_prefix() -> list:
+    """Return [sudo, -E] if not running as root, empty list otherwise."""
+    return ["sudo", "-E"] if os.geteuid() != 0 else []
+
+
 def main():
     os.chdir(Path(__file__).absolute().parent)
     parser = argparse.ArgumentParser(description="Docker build toolchain with optimized Dockerfile generation")
@@ -29,7 +34,7 @@ def main():
             # Clean up build images
             build_image_name = f"{builder.container_name}_build:latest"
             try:
-                subprocess.run(["docker", "rmi", build_image_name], check=True)
+                subprocess.run(sudo_prefix() + ["docker", "rmi", build_image_name], check=True)
                 print(f"Removed image: {build_image_name}")
             except subprocess.CalledProcessError:
                 print("No image to remove")
@@ -104,7 +109,7 @@ class DockerBuildTool:
         """Check if build container exists."""
         try:
             result = subprocess.run(
-                ["docker", "ps", "-a", "--filter", f"name={self.container_name}", "--format", "{{.Names}}"],
+                sudo_prefix() + ["docker", "ps", "-a", "--filter", f"name={self.container_name}", "--format", "{{.Names}}"],
                 capture_output=True, text=True, check=True
             )
             return self.container_name in result.stdout
@@ -115,7 +120,7 @@ class DockerBuildTool:
         """Check if build container is running."""
         try:
             result = subprocess.run(
-                ["docker", "ps", "--filter", f"name={self.container_name}", "--format", "{{.Names}}"],
+                sudo_prefix() + ["docker", "ps", "--filter", f"name={self.container_name}", "--format", "{{.Names}}"],
                 capture_output=True, text=True, check=True
             )
             return self.container_name in result.stdout
@@ -442,7 +447,7 @@ CMD ["tail", "-f", "/dev/null"]
             build_image_name = f"{self.container_name}_build:latest"
             print(f"Building Docker image: {build_image_name}")
             
-            subprocess.run([
+            subprocess.run(sudo_prefix() + [
                 "docker", "build", 
                 "-t", build_image_name,
                 "-f", str(self.dockerfile_path),
@@ -456,7 +461,7 @@ CMD ["tail", "-f", "/dev/null"]
             
             # Check if image exists
             try:
-                subprocess.run([
+                subprocess.run(sudo_prefix() + [
                     "docker", "image", "inspect", build_image_name
                 ], check=True, capture_output=True)
                 print(f"Using existing image: {build_image_name}")
@@ -470,7 +475,7 @@ CMD ["tail", "-f", "/dev/null"]
                 # Save cache when generating Dockerfile
                 self.save_cache(current_deps, cached_deps_order)
                 
-                subprocess.run([
+                subprocess.run(sudo_prefix() + [
                     "docker", "build", 
                     "-t", build_image_name,
                     "-f", str(self.dockerfile_path),

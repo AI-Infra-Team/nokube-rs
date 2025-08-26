@@ -1,10 +1,12 @@
 use anyhow::Result;
 use std::process::Command;
 use tracing::info;
+use crate::remote_ctl::SSHManager;
 
 pub struct GrafanaManager {
     port: u16,
     greptimedb_endpoint: String,
+    ssh_manager: Option<SSHManager>,
 }
 
 impl GrafanaManager {
@@ -12,6 +14,15 @@ impl GrafanaManager {
         Self {
             port,
             greptimedb_endpoint,
+            ssh_manager: None,
+        }
+    }
+
+    pub fn with_ssh(port: u16, greptimedb_endpoint: String, ssh_manager: SSHManager) -> Self {
+        Self {
+            port,
+            greptimedb_endpoint,
+            ssh_manager: Some(ssh_manager),
         }
     }
 
@@ -35,9 +46,20 @@ impl GrafanaManager {
     }
 
     async fn create_grafana_config(&self) -> Result<()> {
-        let config = format!(r#"
-[server]
-http_port = {}
+        let config = format!(r#"[server]
+http_port = 3000
+
+[security]
+admin_user = admin
+admin_password = admin
+
+[users]
+allow_sign_up = false
+
+[auth.anonymous]
+enabled = true
+org_name = Main Org.
+org_role = Viewer
 
 [datasources]
 name = GreptimeDB
@@ -45,29 +67,132 @@ type = prometheus
 url = {}
 access = proxy
 isDefault = true
-"#, self.port, self.greptimedb_endpoint);
+"#, self.greptimedb_endpoint);
 
-        std::fs::write("/tmp/grafana.ini", config)?;
+        // 通过SSH创建配置文件
+        match &self.ssh_manager {
+            Some(ssh) => {
+                // 先创建配置内容到远程临时文件
+                let create_config_cmd = format!("cat > /tmp/grafana.ini << 'EOF'\n{}\nEOF", config);
+                ssh.execute_command(&create_config_cmd, true, false).await?;
+                info!("Grafana config created on remote host");
+            }
+            None => {
+                std::fs::write("/tmp/grafana.ini", config)?;
+                info!("Grafana config created locally");
+            }
+        }
         Ok(())
     }
 
     async fn start_grafana_container(&self) -> Result<()> {
-        let output = Command::new("docker")
-            .args(&[
-                "run", "-d",
-                "--name", "nokube-grafana",
-                "-p", &format!("{}:3000", self.port),
-                "-v", "/tmp/grafana.ini:/etc/grafana/grafana.ini",
-                "grafana/grafana:latest"
-            ])
-            .output()?;
+        let docker_cmd = format!(
+            "docker run -d --name nokube-grafana -p {}:3000 -v /tmp/grafana.ini:/etc/grafana/grafana.ini grafana/grafana:latest",
+            self.port
+        );
 
-        if !output.status.success() {
-            let error_msg = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("Failed to start Grafana container: {}", error_msg);
+        match &self.ssh_manager {
+            Some(ssh) => {
+                // 使用SSH执行命令，启用require_root模式
+                match ssh.execute_command(&docker_cmd, true, false).await {
+                    Ok(result) => {
+                        let container_id = result.trim();
+                        if container_id.len() == 64 && container_id.chars().all(|c| c.is_ascii_hexdigit()) {
+                            // 验证容器是否真正在运行
+                            self.verify_container_running(ssh, container_id).await?;
+                            info!("Grafana container started via SSH with ID: {}", container_id);
+                        } else {
+                            info!("Grafana container started via SSH: {}", container_id);
+                        }
+                    }
+                    Err(e) => {
+                        // 检查错误消息中是否包含容器ID
+                        let error_msg = e.to_string();
+                        if let Some(container_id) = self.extract_container_id_from_error(&error_msg) {
+                            // 验证容器是否真正在运行
+                            self.verify_container_running(ssh, &container_id).await?;
+                            info!("Grafana container started via SSH with ID: {} (exit code was non-zero but container created)", container_id);
+                        } else {
+                            anyhow::bail!("Failed to start Grafana container: {}", error_msg);
+                        }
+                    }
+                }
+            }
+            None => {
+                // 本地执行，使用sudo
+                let output = Command::new("sudo")
+                    .args(&[
+                        "docker", "run", "-d",
+                        "--name", "nokube-grafana",
+                        "-p", &format!("{}:3000", self.port),
+                        "-v", "/tmp/grafana.ini:/etc/grafana/grafana.ini",
+                        "grafana/grafana:latest"
+                    ])
+                    .output()?;
+
+                if !output.status.success() {
+                    let error_msg = String::from_utf8_lossy(&output.stderr);
+                    anyhow::bail!("Failed to start Grafana container: {}", error_msg);
+                }
+                info!("Grafana container started locally with sudo");
+            }
         }
 
         Ok(())
+    }
+
+    async fn verify_container_running(&self, ssh: &SSHManager, container_id: &str) -> Result<()> {
+        // 使用 docker ps -q --filter id=<container_id> 验证容器是否运行
+        let verify_cmd = format!("docker ps -q --filter id={}", &container_id[..12]); // 只使用前12位ID
+        
+        match ssh.execute_command(&verify_cmd, true, false).await {
+            Ok(result) => {
+                let running_id = result.trim();
+                if running_id.is_empty() {
+                    // 容器不在运行，检查容器状态和日志
+                    info!("Container {} not running, checking status and logs...", container_id);
+                    
+                    // 检查容器状态
+                    let status_cmd = format!("docker ps -a --filter id={} --format 'table {{{{.Status}}}}'", &container_id[..12]);
+                    if let Ok(status_result) = ssh.execute_command(&status_cmd, true, false).await {
+                        info!("Container status: {}", status_result.trim());
+                    }
+                    
+                    // 获取容器日志
+                    let logs_cmd = format!("docker logs {}", &container_id[..12]);
+                    if let Ok(logs_result) = ssh.execute_command(&logs_cmd, true, false).await {
+                        info!("Container logs: {}", logs_result.trim());
+                    }
+                    
+                    anyhow::bail!("Container {} is not running. Check logs above for details.", container_id);
+                } else {
+                    info!("Verified container {} is running (short ID: {})", container_id, running_id);
+                }
+            }
+            Err(e) => {
+                anyhow::bail!("Failed to verify container status: {}", e);
+            }
+        }
+        Ok(())
+    }
+
+    fn extract_container_id_from_error(&self, error_msg: &str) -> Option<String> {
+        if let Some(start) = error_msg.find("stdout:\n") {
+            let stdout_part = if let Some(end) = error_msg[start + 8..].find("\nstderr:\n") {
+                &error_msg[start + 8..start + 8 + end]
+            } else {
+                &error_msg[start + 8..]
+            };
+            
+            let container_id = stdout_part.trim();
+            if container_id.len() == 64 && container_id.chars().all(|c| c.is_ascii_hexdigit()) {
+                Some(container_id.to_string())
+            } else {
+                None
+            }
+        } else {
+            None
+        }
     }
 
     async fn configure_data_source(&self) -> Result<()> {
@@ -299,18 +424,31 @@ isDefault = true
     pub async fn stop_grafana(&self) -> Result<()> {
         info!("Stopping Grafana");
         
-        let output = Command::new("docker")
-            .args(&["stop", "nokube-grafana"])
-            .output()?;
+        match &self.ssh_manager {
+            Some(ssh) => {
+                // 使用SSH执行命令，启用require_root模式
+                let _result = ssh.execute_command("docker stop nokube-grafana", true, false).await?;
+                let _result = ssh.execute_command("docker rm nokube-grafana", true, false).await.ok();
+                info!("Grafana container stopped via SSH");
+            }
+            None => {
+                // 本地执行，使用sudo
+                let output = Command::new("sudo")
+                    .args(&["docker", "stop", "nokube-grafana"])
+                    .output()?;
 
-        if !output.status.success() {
-            let error_msg = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("Failed to stop Grafana container: {}", error_msg);
+                if !output.status.success() {
+                    let error_msg = String::from_utf8_lossy(&output.stderr);
+                    anyhow::bail!("Failed to stop Grafana container: {}", error_msg);
+                }
+
+                let _ = Command::new("sudo")
+                    .args(&["docker", "rm", "nokube-grafana"])
+                    .output();
+                    
+                info!("Grafana container stopped locally with sudo");
+            }
         }
-
-        let _ = Command::new("docker")
-            .args(&["rm", "nokube-grafana"])
-            .output();
 
         Ok(())
     }

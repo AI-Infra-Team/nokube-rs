@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(./target/nokube new-or-update --help)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

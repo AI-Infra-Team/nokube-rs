@@ -1,0 +1,8 @@
+LICENSE
+README.md
+setup.py
+nokube_rs_tools.egg-info/PKG-INFO
+nokube_rs_tools.egg-info/SOURCES.txt
+nokube_rs_tools.egg-info/dependency_links.txt
+nokube_rs_tools.egg-info/requires.txt
+nokube_rs_tools.egg-info/top_level.txt

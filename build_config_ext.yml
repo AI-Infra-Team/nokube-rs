@@ -1,0 +1,29 @@
+# Build configuration with Docker volume mappings
+# 支持当前 docker run 挂载的项目路径映射
+
+# Docker registry configuration
+docker_registry:
+  username: hanbaoaaa
+  password: Peter991213
+
+# 容器路径映射配置 (容器路径:宿主机路径)
+# 配置格式与 docker 保持一致，使用 : 分隔
+volume_mappings:
+  - "/opt/pa/prjs/nokube-rs:/home/pa/nokube-rs"
+  - "/tmp:/tmp" 
+  - "/var/run/docker.sock:/var/run/docker.sock"
+  - "/home/pa/.cargo:/root/.cargo"
+  - "/home/pa/.rustup:/root/.rustup"
+
+# MinIO 服务器配置  
+minio:
+  access_address: "10.126.126.233:9005"
+  access_key: "minioadmin"
+  secret_key: "minioadmin"
+  bucket_name: "cache-bucket"
+  
+# Build settings
+build:
+  force_rebuild: false
+  cache_enabled: true
+  parallel_jobs: 4

@@ -5,6 +5,7 @@ use std::net::TcpStream;
 use std::path::Path;
 use tracing::info;
 
+#[derive(Clone)]
 pub struct SSHManager {
     host: String,
     username: String,

@@ -61,27 +61,8 @@ impl DeploymentController {
         }
 
         // Setup Grafana monitoring panel
-        // 直接使用head节点作为greptimedb端点
-        if let Some(head_node) = cluster_config
-            .nodes
-            .iter()
-            .find(|n| matches!(n.role, crate::config::cluster_config::NodeRole::Head))
-        {
-            let greptimedb_endpoint = format!(
-                "http://{}:{}",
-                head_node.get_ip()?,
-                cluster_config.task_spec.monitoring.greptimedb.port
-            );
-
-            let grafana_manager = GrafanaManager::new(
-                cluster_config.task_spec.monitoring.grafana.port,
-                greptimedb_endpoint,
-            );
-
-            grafana_manager.setup_grafana(cluster_name).await?;
-        } else {
-            tracing::warn!("No head node found for monitoring setup");
-        }
+        // Monitoring setup is now handled by the agent during deployment
+        info!("Monitoring setup will be handled by node agents during deployment");
 
         // Start master agent with monitoring
         // TODO: Implement master agent creation logic
@@ -196,11 +177,45 @@ echo "Dependencies installed successfully"
                     .map_err(|e| anyhow::anyhow!("Failed to upload config file /home/pa/.nokube/config.yaml to {}: {}", remote_config_path, e))?;
 
                 // 构造参数对象并 base64 编码
-                let extra_params = json!({
+                let mut extra_params = json!({
                     "cluster_name": cluster_config.cluster_name,
                     "node_id": node.name,
-                    // "etcd_endpoints" 字段已移除，避免构建错误
                 });
+                
+                // 如果是head节点且监控开启，添加Grafana配置
+                if matches!(node.role, crate::config::cluster_config::NodeRole::Head) 
+                    && cluster_config.task_spec.monitoring.enabled {
+                    info!("Adding Grafana configuration for head node: {}", node.name);
+                    let grafana_config = format!(r#"[server]
+http_port = 3000
+
+[security]
+admin_user = admin
+admin_password = admin
+
+[users]
+allow_sign_up = false
+
+[auth.anonymous]
+enabled = true
+org_name = Main Org.
+org_role = Viewer
+
+[datasources]
+name = GreptimeDB
+type = prometheus
+url = http://{}:{}
+access = proxy
+isDefault = true
+"#, 
+                        node.get_ip()?, 
+                        cluster_config.task_spec.monitoring.greptimedb.port
+                    );
+                    
+                    extra_params["grafana_config"] = json!(grafana_config);
+                    extra_params["grafana_port"] = json!(cluster_config.task_spec.monitoring.grafana.port);
+                    extra_params["setup_grafana"] = json!(true);
+                }
                 let extra_params_str = serde_json::to_string(&extra_params).unwrap_or_default();
                 let extra_params_b64 = general_purpose::STANDARD.encode(extra_params_str);
 
@@ -240,9 +255,9 @@ echo "Dependencies installed successfully"
                     .upload_file("/tmp/node_config.json", "/opt/nokube-agent/config.json")
                     .await?;
 
-                // Restart agent service
+                // Restart agent container
                 ssh_manager
-                    .execute_command("systemctl restart nokube-agent", true, false)
+                    .execute_command("docker restart nokube-agent-container", true, false)
                     .await
                     .ok();
 
@@ -286,22 +301,7 @@ echo "Dependencies installed successfully"
                     url: greptimedb_url,
                 });
 
-                // 实际重启绑定服务 - 按照 .cursorrules 的要求
-                info!("Stopping and restarting bound services (grafana, greptimedb) with updated configurations...");
-                
-                // 创建 GrafanaManager 并重新配置
-                let greptimedb_endpoint = format!("http://{}:{}", host, greptimedb_port);
-                let grafana_manager = GrafanaManager::new(grafana_port, greptimedb_endpoint);
-                
-                // 先停止现有的 Grafana 服务
-                if let Err(e) = grafana_manager.stop_grafana().await {
-                    tracing::warn!("Failed to stop existing Grafana service: {}", e);
-                }
-                
-                // 重新启动 Grafana 并配置数据源
-                grafana_manager.setup_grafana(&cluster_config.cluster_name).await?;
-                
-                info!("Successfully restarted and reconfigured Grafana with updated node IP: {}", host);
+                info!("Bound services (Grafana, GreptimeDB) are managed by node agents");
             }
         }
 
