@@ -186,12 +186,16 @@ impl CommandModeAgent {
     async fn setup_docker_service(&self) -> Result<()> {
         info!("Setting up Docker container service");
 
-        // 获取当前用户信息（从环境变量或配置中）
-        let current_user = std::env::var("USER").unwrap_or_else(|_| "pa".to_string());
-        let home_dir = std::env::var("HOME").unwrap_or_else(|_| format!("/home/{}", current_user));
+        // 获取当前用户信息（从环境变量获取，如果缺失则报错）
+        let current_user = std::env::var("USER")
+            .map_err(|_| anyhow::anyhow!("USER environment variable not set - cannot determine user"))?;
+        let home_dir = std::env::var("HOME")
+            .map_err(|_| anyhow::anyhow!("HOME environment variable not set - cannot determine home directory"))?;
         
-        // 使用用户级别的配置路径
-        let config_path = format!("{}/.nokube/config.yaml", home_dir);
+        // 获取workspace并构建宿主机配置路径（将被挂载到容器标准路径）
+        let workspace = self.get_workspace()?;
+        let host_config_dir = format!("{}/config", workspace);
+        let host_config_path = format!("{}/config.yaml", host_config_dir);
 
         // 创建包含cluster_name的extra_params
         let cluster_params = serde_json::json!({
@@ -236,14 +240,15 @@ impl CommandModeAgent {
                 "--name", "nokube-agent-container",
                 "--restart", "unless-stopped",
                 "-v", &format!("{}:{}", home_dir, home_dir),
-                "-v", &format!("{}:{}:ro", remote_lib_path, remote_lib_path),
+                "-v", &format!("{}:{}", remote_lib_path, remote_lib_path),
+                "-v", &format!("{}:/etc/.nokube/config.yaml", host_config_path), // 挂载配置文件到容器标准路径
                 "-e", &format!("LD_LIBRARY_PATH={}", remote_lib_path),
                 "-e", &format!("HOME={}", home_dir),
                 "--network", "host",
                 "--workdir", &home_dir,
                 "ubuntu:22.04",
                 "bash", "-c", 
-                &format!("while [ ! -f {}/nokube ]; do echo 'Waiting for nokube binary...'; sleep 1; done && chmod +x {}/nokube && {}/nokube agent-service --config-path {} --extra-params {}", remote_lib_path, remote_lib_path, remote_lib_path, config_path, extra_params)
+                &format!("while [ ! -f {}/nokube ]; do echo 'Waiting for nokube binary...'; sleep 1; done && chmod +x {}/nokube && {}/nokube agent-service --extra-params {}", remote_lib_path, remote_lib_path, remote_lib_path, extra_params)
             ])
             .output()
             .map_err(|e| anyhow::anyhow!("Failed to execute docker run command: {}", e))?;
@@ -265,15 +270,16 @@ impl CommandModeAgent {
                     info!("Setting up Grafana as requested in extra params");
                     
                     // 从方法获取workspace路径
-                    let workspace = self.get_workspace();
+                    let workspace = self.get_workspace()?;
                     
                     // 获取Grafana配置和端口
                     let grafana_config = params.get("grafana_config")
                         .and_then(|v| v.as_str())
-                        .unwrap_or("");
+                        .ok_or_else(|| anyhow::anyhow!("Missing required grafana_config in extra_params"))?;
                     let grafana_port = params.get("grafana_port")
                         .and_then(|v| v.as_u64())
-                        .unwrap_or(3000) as u16;
+                        .ok_or_else(|| anyhow::anyhow!("Missing required grafana_port in extra_params"))?
+                        as u16;
                     
                     // 创建workspace内的config目录
                     let config_dir = format!("{}/config", workspace);

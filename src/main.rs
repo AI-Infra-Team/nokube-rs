@@ -25,15 +25,11 @@ enum Commands {
     },
     /// Run agent in command mode (for deployment operations)
     AgentCommand {
-        #[arg(short, long)]
-        config_path: String,
         #[arg(long)]
         extra_params: Option<String>,
     },
     /// Run agent in service mode (persistent execution)
     AgentService {
-        #[arg(short, long)]
-        config_path: String,
         #[arg(long)]
         extra_params: Option<String>,
     },
@@ -64,8 +60,8 @@ async fn main() -> Result<()> {
         Commands::Init { cluster_name } => handle_init(cluster_name).await,
         Commands::NewOrUpdate { config_file } => handle_new_or_update(config_file).await,
         Commands::Monitor { cluster_name } => handle_monitor(cluster_name).await,
-        Commands::AgentCommand { config_path, extra_params } => handle_agent_command(config_path, extra_params).await,
-        Commands::AgentService { config_path, extra_params } => handle_agent_service(config_path, extra_params).await,
+        Commands::AgentCommand { extra_params } => handle_agent_command(extra_params).await,
+        Commands::AgentService { extra_params } => handle_agent_service(extra_params).await,
     };
 
     if let Err(e) = &result {
@@ -178,8 +174,8 @@ async fn handle_monitor(cluster_name: String) -> Result<()> {
     }
 }
 
-async fn handle_agent_command(config_path: String, extra_params: Option<String>) -> Result<()> {
-    info!("Running agent in command mode with config: {}", config_path);
+async fn handle_agent_command(extra_params: Option<String>) -> Result<()> {
+    info!("Running agent in command mode");
     
     // 解析额外参数
     let parsed_params = extra_params.as_ref()
@@ -191,12 +187,7 @@ async fn handle_agent_command(config_path: String, extra_params: Option<String>)
     
     let cluster_name = parsed_params.as_ref()
         .and_then(|params| params.get("cluster_name").and_then(|v| v.as_str()).map(|s| s.to_string()))
-        .or_else(|| {
-            std::fs::read_to_string(&config_path).ok()
-                .and_then(|content| serde_yaml::from_str::<config::cluster_config::ClusterConfig>(&content).ok())
-                .map(|cfg| cfg.cluster_name.clone())
-        })
-        .unwrap_or_else(|| "default".to_string());
+        .ok_or_else(|| NokubeError::Config("Missing cluster_name in extra_params".to_string()))?;
 
     let config_manager = ConfigManager::new().await
         .map_err(|e| {
@@ -233,19 +224,14 @@ async fn handle_agent_command(config_path: String, extra_params: Option<String>)
     Ok(())
 }
 
-async fn handle_agent_service(config_path: String, extra_params: Option<String>) -> Result<()> {
-    info!("Starting agent service with config: {}", config_path);
+async fn handle_agent_service(extra_params: Option<String>) -> Result<()> {
+    info!("Starting agent service");
     let cluster_name = extra_params.as_ref()
         .and_then(|params_b64| {
             base64::engine::general_purpose::STANDARD.decode(params_b64).ok()
                 .and_then(|params_json| String::from_utf8(params_json).ok())
                 .and_then(|params_str| serde_json::from_str::<serde_json::Value>(&params_str).ok())
                 .and_then(|params| params.get("cluster_name").and_then(|v| v.as_str()).map(|s| s.to_string()))
-        })
-        .or_else(|| {
-            std::fs::read_to_string(&config_path).ok()
-                .and_then(|content| serde_yaml::from_str::<config::cluster_config::ClusterConfig>(&content).ok())
-                .map(|cfg| cfg.cluster_name.clone())
         })
         .unwrap_or_else(|| "default".to_string());
 

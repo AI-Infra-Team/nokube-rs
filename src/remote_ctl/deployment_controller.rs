@@ -198,12 +198,24 @@ echo "Dependencies installed successfully"
                 ssh_manager.execute_command(&verify_cmd, true, true).await
                     .map_err(|e| anyhow::anyhow!("Failed to verify binary on node {}: {}", node.name, e))?;
 
-                // 上传 nokube config 到远程用户配置路径
-                let remote_config_path = "/home/pa/.nokube/config.yaml"; // 可根据目标用户调整
+                // 获取目标用户信息
+                let target_user = node.users.first()
+                    .ok_or_else(|| anyhow::anyhow!("No user configuration found for node: {}", node.name))?;
+                
+                // 构建全局配置路径（将被挂载到容器标准路径）
+                let remote_config_dir = format!("{}/config", workspace);
+                let remote_config_path = format!("{}/config.yaml", remote_config_dir);
+                
+                // 创建全局配置目录
+                let create_config_dir_cmd = format!("mkdir -p {}", remote_config_dir);
+                ssh_manager.execute_command(&create_config_dir_cmd, true, true).await
+                    .map_err(|e| anyhow::anyhow!("Failed to create config directory on node {}: {}", node.name, e))?;
+                
+                // 上传 nokube config 到全局配置路径（将被挂载到容器内）
                 ssh_manager
-                    .upload_file("/home/pa/.nokube/config.yaml", remote_config_path)
+                    .upload_file("/home/pa/.nokube/config.yaml", &remote_config_path)
                     .await
-                    .map_err(|e| anyhow::anyhow!("Failed to upload config file /home/pa/.nokube/config.yaml to {}: {}", remote_config_path, e))?;
+                    .map_err(|e| anyhow::anyhow!("Failed to upload config file to {}: {}", remote_config_path, e))?;
 
                 // 构造参数对象并 base64 编码
                 let mut extra_params = json!({
@@ -253,8 +265,7 @@ isDefault = true
 
                 // 远程执行 agent，传递 base64 参数
                 let cmd = format!(
-                    "LD_LIBRARY_PATH={remote_lib} {remote_lib}/nokube agent-command --config-path {} --extra-params {}",
-                    remote_config_path,
+                    "LD_LIBRARY_PATH={remote_lib} {remote_lib}/nokube agent-command --extra-params {}",
                     extra_params_b64,
                     remote_lib = remote_lib_path
                 );
@@ -279,6 +290,7 @@ isDefault = true
 
             if let Some(ssh_manager) = self.ssh_managers.get(ssh_key) {
                 let workspace = node.get_workspace()?;
+                // 使用全局配置路径
                 let config_dir = format!("{}/config", workspace);
                 
                 // Create node configuration file in local staging area
@@ -296,7 +308,7 @@ isDefault = true
                 ssh_manager.execute_command(&create_config_dir_cmd, true, true).await
                     .map_err(|e| anyhow::anyhow!("Failed to create config directory {} on node {}: {}", config_dir, node.name, e))?;
 
-                // Upload configuration
+                // Upload configuration to global config directory
                 let remote_config_path = format!("{}/node_config.json", config_dir);
                 ssh_manager
                     .upload_file(&local_config_path, &remote_config_path)
