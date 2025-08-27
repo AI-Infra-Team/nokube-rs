@@ -34,6 +34,7 @@ pub struct NodeConfig {
     pub storage: StorageConfig,
     pub users: Vec<UserConfig>,
     pub proxy: Option<ProxyConfig>,
+    pub workspace: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -103,6 +104,29 @@ impl NodeConfig {
             .split(':')
             .next()
             .ok_or_else(|| anyhow::anyhow!("Invalid SSH URL format: {}", self.ssh_url))
+    }
+
+    /// 获取节点的工作空间路径，如果未指定则报错
+    pub fn get_workspace(&self) -> Result<&str, anyhow::Error> {
+        self.workspace.as_deref()
+            .ok_or_else(|| anyhow::anyhow!("Missing required workspace configuration for node: {}", self.name))
+    }
+
+    /// 获取节点的存储路径，会使用 workspace 作为前缀
+    pub fn get_storage_path(&self) -> Result<String, anyhow::Error> {
+        let workspace = self.get_workspace()?;
+        if self.storage.path.starts_with('/') {
+            // 如果 storage.path 是绝对路径，检查是否已经在 workspace 下
+            if self.storage.path.starts_with(workspace) {
+                Ok(self.storage.path.clone())
+            } else {
+                // 否则将其作为相对路径添加到 workspace 下
+                Ok(format!("{}{}", workspace, self.storage.path))
+            }
+        } else {
+            // 如果是相对路径，直接添加到 workspace 下
+            Ok(format!("{}/{}", workspace, self.storage.path))
+        }
     }
 }
 

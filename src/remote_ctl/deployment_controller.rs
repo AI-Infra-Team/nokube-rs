@@ -75,10 +75,9 @@ impl DeploymentController {
 
     async fn initialize_ssh_managers(&mut self, cluster_config: &ClusterConfig) -> Result<()> {
         for node in &cluster_config.nodes {
-            // Parse SSH URL to extract host and port
-            let ssh_parts: Vec<&str> = node.ssh_url.split(':').collect();
-            let host = ssh_parts[0].to_string();
-
+            // 直接使用完整的SSH URL作为连接地址（包含端口）
+            let host_with_port = node.ssh_url.clone();
+            
             // 用第一个用户信息
             let (username, password) = if let Some(user) = node.users.first() {
                 (user.userid.clone(), Some(user.password.clone()))
@@ -87,12 +86,13 @@ impl DeploymentController {
             };
 
             let ssh_manager = SSHManager::new_with_password(
-                host.clone(),
+                host_with_port.clone(),
                 username,
                 None, // SSH key path
                 password,
             );
-            self.ssh_managers.insert(host, ssh_manager);
+            // 使用完整URL作为key，这样在其他地方查找时能匹配
+            self.ssh_managers.insert(host_with_port, ssh_manager);
         }
         Ok(())
     }
@@ -105,25 +105,29 @@ impl DeploymentController {
         // 2. Preparing installation scripts
         // 3. Packaging remote_lib for distribution
 
-        // Create remote_lib directory structure FIRST
-        std::fs::create_dir_all("/tmp/nokube-remote-lib")
-            .map_err(|e| anyhow::anyhow!("Failed to create directory /tmp/nokube-remote-lib: {}", e))?;
+        // 使用当前目录下的临时文件夹，不使用系统 /tmp
+        let local_staging_dir = "./tmp/nokube-remote-lib";
+        
+        // Create local staging directory structure
+        std::fs::create_dir_all(local_staging_dir)
+            .map_err(|e| anyhow::anyhow!("Failed to create directory {}: {}", local_staging_dir, e))?;
 
         // 复制 libcrypto.so.1.1 到待上传目录（如存在）
         let libcrypto_src = "target/libcrypto.so.1.1";
-        let libcrypto_dst = "/tmp/nokube-remote-lib/libcrypto.so.1.1";
+        let libcrypto_dst = format!("{}/libcrypto.so.1.1", local_staging_dir);
         if std::path::Path::new(libcrypto_src).exists() {
-            std::fs::copy(libcrypto_src, libcrypto_dst)
+            std::fs::copy(libcrypto_src, &libcrypto_dst)
                 .map_err(|e| anyhow::anyhow!("Failed to copy {} to {}: {}", libcrypto_src, libcrypto_dst, e))?;
         }
         // 复制二进制文件到待上传目录
-        std::fs::copy("target/nokube", "/tmp/nokube-remote-lib/nokube")
-            .map_err(|e| anyhow::anyhow!("Failed to copy target/nokube to /tmp/nokube-remote-lib/nokube: {}", e))?;
+        let nokube_dst = format!("{}/nokube", local_staging_dir);
+        std::fs::copy("target/nokube", &nokube_dst)
+            .map_err(|e| anyhow::anyhow!("Failed to copy target/nokube to {}: {}", nokube_dst, e))?;
         // 复制 libssl.so.1.1 到待上传目录（如存在）
         let libssl_src = "target/libssl.so.1.1";
-        let libssl_dst = "/tmp/nokube-remote-lib/libssl.so.1.1";
+        let libssl_dst = format!("{}/libssl.so.1.1", local_staging_dir);
         if std::path::Path::new(libssl_src).exists() {
-            std::fs::copy(libssl_src, libssl_dst)
+            std::fs::copy(libssl_src, &libssl_dst)
                 .map_err(|e| anyhow::anyhow!("Failed to copy {} to {}: {}", libssl_src, libssl_dst, e))?;
         }
 
@@ -144,10 +148,11 @@ apt-get install -y htop iotop net-tools
 
 echo "Dependencies installed successfully"
 "#;
+        let install_script_path = format!("{}/install_dependencies.py", local_staging_dir);
         std::fs::write(
-            "/tmp/nokube-remote-lib/install_dependencies.py",
+            &install_script_path,
             install_script,
-        ).map_err(|e| anyhow::anyhow!("Failed to write install script to /tmp/nokube-remote-lib/install_dependencies.py: {}", e))?;
+        ).map_err(|e| anyhow::anyhow!("Failed to write install script to {}: {}", install_script_path, e))?;
 
         info!("Dependencies prepared");
         Ok(())
@@ -159,15 +164,39 @@ echo "Dependencies installed successfully"
         use base64::{engine::general_purpose, Engine as _};
         use serde_json::json;
         for node in &cluster_config.nodes {
-            // Parse SSH URL to extract host
-            let ssh_parts: Vec<&str> = node.ssh_url.split(':').collect();
-            let host = ssh_parts[0];
+            // 使用完整的SSH URL作为查找键
+            let ssh_key = &node.ssh_url;
 
-            if let Some(ssh_manager) = self.ssh_managers.get(host) {
+            if let Some(ssh_manager) = self.ssh_managers.get(ssh_key) {
+                // 获取节点的 workspace 路径并构建远程lib路径
+                let workspace = node.get_workspace()?;
+                let remote_lib_path = format!("{}/nokube-remote-lib", workspace);
+                let storage_path = node.get_storage_path()?;
+                
+                info!("Deploying to node {} with workspace: {}, storage: {}", node.name, workspace, storage_path);
+                
+                // 创建工作空间目录
+                let create_workspace_cmd = format!("mkdir -p {}", workspace);
+                ssh_manager.execute_command(&create_workspace_cmd, true, true).await
+                    .map_err(|e| anyhow::anyhow!("Failed to create workspace {} on node {}: {}", workspace, node.name, e))?;
+                
+                // 创建存储目录
+                let create_storage_cmd = format!("mkdir -p {}", storage_path);
+                ssh_manager.execute_command(&create_storage_cmd, true, true).await
+                    .map_err(|e| anyhow::anyhow!("Failed to create storage path {} on node {}: {}", storage_path, node.name, e))?;
+                
                 // 上传 remote_lib 目录（不包含 cluster config）
+                let local_staging_dir = "./tmp/nokube-remote-lib";
                 ssh_manager
-                    .upload_directory("/tmp/nokube-remote-lib", "/opt/nokube-remote-lib", true)
-                    .await?;
+                    .upload_directory(local_staging_dir, &remote_lib_path, true)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to upload remote lib to node {}: {}", node.name, e))?;
+                
+                // 验证上传的二进制文件
+                info!("Verifying uploaded binary on node: {}", node.name);
+                let verify_cmd = format!("ls -la {}/nokube", remote_lib_path);
+                ssh_manager.execute_command(&verify_cmd, true, true).await
+                    .map_err(|e| anyhow::anyhow!("Failed to verify binary on node {}: {}", node.name, e))?;
 
                 // 上传 nokube config 到远程用户配置路径
                 let remote_config_path = "/home/pa/.nokube/config.yaml"; // 可根据目标用户调整
@@ -180,6 +209,8 @@ echo "Dependencies installed successfully"
                 let mut extra_params = json!({
                     "cluster_name": cluster_config.cluster_name,
                     "node_id": node.name,
+                    "workspace": workspace,  // 传递 workspace 路径
+                    "node_ip": node.get_ip()?,  // 传递节点IP
                 });
                 
                 // 如果是head节点且监控开启，添加Grafana配置
@@ -214,6 +245,7 @@ isDefault = true
                     
                     extra_params["grafana_config"] = json!(grafana_config);
                     extra_params["grafana_port"] = json!(cluster_config.task_spec.monitoring.grafana.port);
+                    extra_params["greptimedb_port"] = json!(cluster_config.task_spec.monitoring.greptimedb.port);
                     extra_params["setup_grafana"] = json!(true);
                 }
                 let extra_params_str = serde_json::to_string(&extra_params).unwrap_or_default();
@@ -221,11 +253,13 @@ isDefault = true
 
                 // 远程执行 agent，传递 base64 参数
                 let cmd = format!(
-                    "LD_LIBRARY_PATH=/opt/nokube-remote-lib /opt/nokube-remote-lib/nokube agent-command --config-path {} --extra-params {}",
+                    "LD_LIBRARY_PATH={remote_lib} {remote_lib}/nokube agent-command --config-path {} --extra-params {}",
                     remote_config_path,
-                    extra_params_b64
+                    extra_params_b64,
+                    remote_lib = remote_lib_path
                 );
-                ssh_manager.execute_command(&cmd, true, true).await?;
+                ssh_manager.execute_command(&cmd, true, true).await
+                    .map_err(|e| anyhow::anyhow!("Failed to execute agent command on node {}: {}", node.name, e))?;
 
                 info!("Agent deployed successfully on node: {}", node.name);
             } else {
@@ -240,19 +274,32 @@ isDefault = true
         info!("Updating node configurations");
 
         for node in &cluster_config.nodes {
-            // Parse SSH URL to extract host
-            let ssh_parts: Vec<&str> = node.ssh_url.split(':').collect();
-            let host = ssh_parts[0];
+            // 使用完整的SSH URL作为查找键
+            let ssh_key = &node.ssh_url;
 
-            if let Some(ssh_manager) = self.ssh_managers.get(host) {
-                // Create node configuration file
+            if let Some(ssh_manager) = self.ssh_managers.get(ssh_key) {
+                let workspace = node.get_workspace()?;
+                let config_dir = format!("{}/config", workspace);
+                
+                // Create node configuration file in local staging area
+                let local_config_dir = "./tmp/config";
+                std::fs::create_dir_all(local_config_dir)
+                    .map_err(|e| anyhow::anyhow!("Failed to create local config directory: {}", e))?;
+                
+                let local_config_path = format!("{}/node_config.json", local_config_dir);
                 let node_config_json = serde_json::to_string_pretty(node)?;
-                std::fs::write("/tmp/node_config.json", node_config_json)
-                    .map_err(|e| anyhow::anyhow!("Failed to write node config to /tmp/node_config.json: {}", e))?;
+                std::fs::write(&local_config_path, node_config_json)
+                    .map_err(|e| anyhow::anyhow!("Failed to write node config to {}: {}", local_config_path, e))?;
+
+                // Create remote config directory
+                let create_config_dir_cmd = format!("mkdir -p {}", config_dir);
+                ssh_manager.execute_command(&create_config_dir_cmd, true, true).await
+                    .map_err(|e| anyhow::anyhow!("Failed to create config directory {} on node {}: {}", config_dir, node.name, e))?;
 
                 // Upload configuration
+                let remote_config_path = format!("{}/node_config.json", config_dir);
                 ssh_manager
-                    .upload_file("/tmp/node_config.json", "/opt/nokube-agent/config.json")
+                    .upload_file(&local_config_path, &remote_config_path)
                     .await?;
 
                 // Restart agent container

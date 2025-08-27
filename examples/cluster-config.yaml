@@ -18,9 +18,10 @@ nodes:
   - ssh_url: "10.126.126.233:22"
     name: "pa-SER7"  # 实际系统看到的节点名
     role: "head"
+    workspace: "/opt/nokube-workspace"  # 工作空间根路径，所有资源文件将存储在此路径下
     storage:
       type: "local"
-      path: "/opt/nokube/data/ray/head"
+      path: "/data/ray/head"  # 相对于workspace的路径，实际: /opt/nokube-workspace/data/ray/head
     users:
       - userid: "pa"
         password: "74123"
@@ -32,9 +33,10 @@ nodes:
   - ssh_url: "10.126.126.232:22"
     name: "pa-huan14"   # 实际系统看到的节点名
     role: "worker"
+    workspace: "/opt/nokube-workspace"  # 工作空间根路径
     storage:
       type: "local"
-      path: "/opt/nokube/data/ray/worker-1"
+      path: "/data/ray/worker-1"  # 相对于workspace的路径，实际: /opt/nokube-workspace/data/ray/worker-1
     users:
       - userid: "pa"
         password: "74123"

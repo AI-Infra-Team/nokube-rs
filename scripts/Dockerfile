@@ -9,8 +9,8 @@ ENV RUST_VERSION=1.86.0
 ENV PATH="/root/.cargo/bin:${PATH}"
 
 # Proxy environment variables
-ENV http_proxy=http://192.168.1.108:7890
-ENV https_proxy=http://192.168.1.108:7890
+ENV http_proxy=http://192.168.180.128:7890
+ENV https_proxy=http://192.168.180.128:7890
 ENV no_proxy=localhost,127.0.0.1,192.168.,10.126.
 
 # Update package lists (always at the beginning for base layer caching)

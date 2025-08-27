@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "Bash(./target/nokube new-or-update --help)"
+      "Bash(./target/nokube new-or-update --help)",
+      "Bash(grep -r \"get_workspace\\|get_storage_path\" src/ --include=\"*.rs\")"
     ],
     "deny": [],
     "ask": []

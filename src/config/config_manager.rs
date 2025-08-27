@@ -26,8 +26,13 @@ impl ConfigManager {
         self.etcd_endpoints.clone()
     }
     pub async fn new() -> Result<Self> {
+        tracing::info!("Loading nokube configuration...");
         let config = Self::load_nokube_config()?;
+        
+        tracing::info!("Creating EtcdManager with endpoints: {:?}", config.etcd_endpoints);
         let etcd_manager = EtcdManager::new(config.etcd_endpoints.clone()).await?;
+        
+        tracing::info!("ConfigManager initialized successfully");
         Ok(Self { 
             etcd_manager,
             etcd_endpoints: config.etcd_endpoints,

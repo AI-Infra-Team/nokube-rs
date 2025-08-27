@@ -7,22 +7,25 @@ pub struct GrafanaManager {
     port: u16,
     greptimedb_endpoint: String,
     ssh_manager: Option<SSHManager>,
+    workspace: String,
 }
 
 impl GrafanaManager {
-    pub fn new(port: u16, greptimedb_endpoint: String) -> Self {
+    pub fn new(port: u16, greptimedb_endpoint: String, workspace: String) -> Self {
         Self {
             port,
             greptimedb_endpoint,
             ssh_manager: None,
+            workspace,
         }
     }
 
-    pub fn with_ssh(port: u16, greptimedb_endpoint: String, ssh_manager: SSHManager) -> Self {
+    pub fn with_ssh(port: u16, greptimedb_endpoint: String, workspace: String, ssh_manager: SSHManager) -> Self {
         Self {
             port,
             greptimedb_endpoint,
             ssh_manager: Some(ssh_manager),
+            workspace,
         }
     }
 
@@ -69,26 +72,76 @@ access = proxy
 isDefault = true
 "#, self.greptimedb_endpoint);
 
+        let grafana_config_path = format!("{}/config/grafana.ini", self.workspace);
+
         // 通过SSH创建配置文件
         match &self.ssh_manager {
             Some(ssh) => {
-                // 先创建配置内容到远程临时文件
-                let create_config_cmd = format!("cat > /tmp/grafana.ini << 'EOF'\n{}\nEOF", config);
+                // 先创建配置目录
+                let create_dir_cmd = format!("mkdir -p {}/config", self.workspace);
+                ssh.execute_command(&create_dir_cmd, true, false).await?;
+                
+                // 创建配置内容到远程文件
+                let create_config_cmd = format!("cat > {} << 'EOF'\n{}\nEOF", grafana_config_path, config);
                 ssh.execute_command(&create_config_cmd, true, false).await?;
-                info!("Grafana config created on remote host");
+                info!("Grafana config created on remote host at: {}", grafana_config_path);
             }
             None => {
-                std::fs::write("/tmp/grafana.ini", config)?;
-                info!("Grafana config created locally");
+                // 本地创建配置目录
+                std::fs::create_dir_all(format!("{}/config", self.workspace))?;
+                std::fs::write(&grafana_config_path, config)?;
+                info!("Grafana config created locally at: {}", grafana_config_path);
+            }
+        }
+        Ok(())
+    }
+
+    async fn stop_existing_container(&self) -> Result<()> {
+        match &self.ssh_manager {
+            Some(ssh) => {
+                // 使用SSH执行命令，启用require_root模式
+                // 先检查容器是否存在
+                let check_cmd = "docker ps -aq --filter name=nokube-grafana";
+                if let Ok(result) = ssh.execute_command(check_cmd, true, false).await {
+                    if !result.trim().is_empty() {
+                        // 容器存在，先停止再删除
+                        let _ = ssh.execute_command("docker stop nokube-grafana", true, false).await;
+                        let _ = ssh.execute_command("docker rm nokube-grafana", true, false).await;
+                        info!("Stopped and removed existing nokube-grafana container via SSH");
+                    }
+                }
+            }
+            None => {
+                // 本地执行，使用sudo
+                // 先检查容器是否存在
+                let check_output = Command::new("sudo")
+                    .args(&["docker", "ps", "-aq", "--filter", "name=nokube-grafana"])
+                    .output()?;
+                
+                if check_output.status.success() && !check_output.stdout.is_empty() {
+                    // 容器存在，先停止再删除
+                    let _ = Command::new("sudo")
+                        .args(&["docker", "stop", "nokube-grafana"])
+                        .output();
+                    let _ = Command::new("sudo")
+                        .args(&["docker", "rm", "nokube-grafana"])
+                        .output();
+                    info!("Stopped and removed existing nokube-grafana container locally");
+                }
             }
         }
         Ok(())
     }
 
     async fn start_grafana_container(&self) -> Result<()> {
+        // First, stop and remove any existing container with the same name
+        self.stop_existing_container().await?;
+        
+        let grafana_config_path = format!("{}/config/grafana.ini", self.workspace);
         let docker_cmd = format!(
-            "docker run -d --name nokube-grafana -p {}:3000 -v /tmp/grafana.ini:/etc/grafana/grafana.ini grafana/grafana:latest",
-            self.port
+            "docker run -d --name nokube-grafana -p {}:3000 -v {}:/etc/grafana/grafana.ini grafana/grafana:latest",
+            self.port,
+            grafana_config_path
         );
 
         match &self.ssh_manager {
@@ -125,7 +178,7 @@ isDefault = true
                         "docker", "run", "-d",
                         "--name", "nokube-grafana",
                         "-p", &format!("{}:3000", self.port),
-                        "-v", "/tmp/grafana.ini:/etc/grafana/grafana.ini",
+                        "-v", &format!("{}:/etc/grafana/grafana.ini", grafana_config_path),
                         "grafana/grafana:latest"
                     ])
                     .output()?;

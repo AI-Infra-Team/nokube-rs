@@ -54,14 +54,30 @@ impl EtcdManager {
         Ok(metas)
     }
     pub async fn new(endpoints: Vec<String>) -> Result<Self> {
+        tracing::info!("Initializing EtcdManager with endpoints: {:?}", endpoints);
+        
         for e in &endpoints {
             if !(e.starts_with("http://") || e.starts_with("https://")) {
                 anyhow::bail!("etcd endpoint 必须包含 http:// 或 https:// 前缀: {}", e);
             }
         }
+        
+        tracing::info!("Creating etcd client configuration...");
         let endpoints: Vec<Endpoint> = endpoints.into_iter().map(|e| Endpoint::new(e)).collect();
         let config = ClientConfig::new(endpoints);
-        let client = Client::connect(config).await?;
+        
+        tracing::info!("Attempting to connect to etcd...");
+        
+        // 使用超时避免无限期等待
+        let connect_future = Client::connect(config);
+        let timeout_duration = Duration::from_secs(10);
+        
+        let client = tokio::time::timeout(timeout_duration, connect_future)
+            .await
+            .map_err(|_| anyhow::anyhow!("Etcd connection timed out after 10 seconds"))?
+            .map_err(|e| anyhow::anyhow!("Failed to connect to etcd: {}", e))?;
+        
+        tracing::info!("Successfully connected to etcd!");
         Ok(Self { client })
     }
 
