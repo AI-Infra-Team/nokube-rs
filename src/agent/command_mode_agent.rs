@@ -239,6 +239,8 @@ impl CommandModeAgent {
                 "docker", "run", "-d",
                 "--name", "nokube-agent-container",
                 "--restart", "unless-stopped",
+                "--pid", "host", // 使用宿主机PID命名空间，观测宿主机所有进程信息
+                "--privileged", // 特权模式，获得宿主机完全访问权限
                 "-v", &format!("{}:{}", home_dir, home_dir),
                 "-v", &format!("{}:{}", remote_lib_path, remote_lib_path),
                 "-v", &format!("{}:/etc/.nokube/config.yaml", host_config_path), // 挂载配置文件到容器标准路径
@@ -598,16 +600,48 @@ impl CommandModeAgent {
                     "from": "now-1h",
                     "to": "now"
                 },
+                "templating": {
+                    "list": [
+                        {
+                            "allValue": null,
+                            "current": {},
+                            "datasource": "GreptimeDB",
+                            "definition": "label_values(nokube_cpu_usage, instance)",
+                            "hide": 0,
+                            "includeAll": true,
+                            "label": "Node",
+                            "multi": true,
+                            "name": "node",
+                            "options": [],
+                            "query": "label_values(nokube_cpu_usage, instance)",
+                            "refresh": 1,
+                            "regex": "",
+                            "skipUrlSync": false,
+                            "sort": 1,
+                            "tagValuesQuery": "",
+                            "tagsQuery": "",
+                            "type": "query",
+                            "useTags": false
+                        }
+                    ]
+                },
                 "panels": [
                     {
                         "id": 1,
-                        "title": "CPU Usage (%)",
+                        "title": "Cluster Overview",
+                        "type": "row",
+                        "gridPos": {"h": 1, "w": 24, "x": 0, "y": 0},
+                        "collapsed": false
+                    },
+                    {
+                        "id": 2,
+                        "title": "Cluster CPU Usage Overview",
                         "type": "timeseries",
-                        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+                        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 1},
                         "targets": [
                             {
                                 "expr": "nokube_cpu_usage",
-                                "legendFormat": "{{instance}} CPU",
+                                "legendFormat": "{{instance}}",
                                 "interval": "30s"
                             }
                         ],
@@ -627,14 +661,14 @@ impl CommandModeAgent {
                         }
                     },
                     {
-                        "id": 2,
-                        "title": "Memory Usage (%)",
+                        "id": 3,
+                        "title": "Cluster Memory Usage Overview",
                         "type": "timeseries",
-                        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+                        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 1},
                         "targets": [
                             {
                                 "expr": "nokube_memory_usage",
-                                "legendFormat": "{{instance}} Memory",
+                                "legendFormat": "{{instance}}",
                                 "interval": "30s"
                             }
                         ],
@@ -654,10 +688,10 @@ impl CommandModeAgent {
                         }
                     },
                     {
-                        "id": 3,
-                        "title": "Network RX (bytes/sec)",
+                        "id": 4,
+                        "title": "Cluster Network RX Overview",
                         "type": "timeseries", 
-                        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+                        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 9},
                         "targets": [
                             {
                                 "expr": "rate(nokube_network_rx_bytes[5m])",
@@ -667,15 +701,15 @@ impl CommandModeAgent {
                         ],
                         "fieldConfig": {
                             "defaults": {
-                                "unit": "bytes"
+                                "unit": "binBps"
                             }
                         }
                     },
                     {
-                        "id": 4,
-                        "title": "Network TX (bytes/sec)",
+                        "id": 5,
+                        "title": "Cluster Network TX Overview",
                         "type": "timeseries",
-                        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+                        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 9},
                         "targets": [
                             {
                                 "expr": "rate(nokube_network_tx_bytes[5m])",
@@ -685,7 +719,98 @@ impl CommandModeAgent {
                         ],
                         "fieldConfig": {
                             "defaults": {
-                                "unit": "bytes"
+                                "unit": "binBps"
+                            }
+                        }
+                    },
+                    {
+                        "id": 6,
+                        "title": "Node Details - $node",
+                        "type": "row",
+                        "gridPos": {"h": 1, "w": 24, "x": 0, "y": 17},
+                        "collapsed": false,
+                        "repeat": "node"
+                    },
+                    {
+                        "id": 7,
+                        "title": "CPU Usage",
+                        "type": "timeseries",
+                        "gridPos": {"h": 6, "w": 8, "x": 0, "y": 18},
+                        "repeat": "node",
+                        "repeatDirection": "v",
+                        "targets": [
+                            {
+                                "expr": "nokube_cpu_usage{instance=~\"$node\"}",
+                                "legendFormat": "CPU",
+                                "interval": "30s"
+                            }
+                        ],
+                        "fieldConfig": {
+                            "defaults": {
+                                "unit": "percent",
+                                "min": 0,
+                                "max": 100,
+                                "thresholds": {
+                                    "steps": [
+                                        {"color": "green", "value": null},
+                                        {"color": "yellow", "value": 60},
+                                        {"color": "red", "value": 80}
+                                    ]
+                                }
+                            }
+                        }
+                    },
+                    {
+                        "id": 8,
+                        "title": "Memory Usage",
+                        "type": "timeseries",
+                        "gridPos": {"h": 6, "w": 8, "x": 8, "y": 18},
+                        "repeat": "node",
+                        "repeatDirection": "v",
+                        "targets": [
+                            {
+                                "expr": "nokube_memory_usage{instance=~\"$node\"}",
+                                "legendFormat": "Memory",
+                                "interval": "30s"
+                            }
+                        ],
+                        "fieldConfig": {
+                            "defaults": {
+                                "unit": "percent",
+                                "min": 0,
+                                "max": 100,
+                                "thresholds": {
+                                    "steps": [
+                                        {"color": "green", "value": null},
+                                        {"color": "yellow", "value": 70},
+                                        {"color": "red", "value": 85}
+                                    ]
+                                }
+                            }
+                        }
+                    },
+                    {
+                        "id": 9,
+                        "title": "Network I/O",
+                        "type": "timeseries", 
+                        "gridPos": {"h": 6, "w": 8, "x": 16, "y": 18},
+                        "repeat": "node",
+                        "repeatDirection": "v",
+                        "targets": [
+                            {
+                                "expr": "rate(nokube_network_rx_bytes{instance=~\"$node\"}[5m])",
+                                "legendFormat": "RX",
+                                "interval": "30s"
+                            },
+                            {
+                                "expr": "rate(nokube_network_tx_bytes{instance=~\"$node\"}[5m])",
+                                "legendFormat": "TX",
+                                "interval": "30s"
+                            }
+                        ],
+                        "fieldConfig": {
+                            "defaults": {
+                                "unit": "binBps"
                             }
                         }
                     }
