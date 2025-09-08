@@ -1,0 +1,139 @@
+# 示例：无状态服务的正确k8s配置
+# 服务名：etcd
+
+---
+# ConfigMap - 存储所有配置文件
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: etcd-config
+  namespace: default
+data:
+  # 下载基础URL
+  download_base_url: "https://releases.example.com"
+  
+  # etcd配置文件
+  etcd.conf: |
+    name: etcd-node
+    data-dir: /var/lib/etcd
+    listen-client-urls: http://0.0.0.0:2379
+    advertise-client-urls: http://0.0.0.0:2379
+    listen-peer-urls: http://0.0.0.0:2380
+    initial-cluster-state: new
+    
+  # 日志配置
+  log.conf: |
+    level: info
+    format: json
+    output: stdout
+
+---
+# Secret - 存储私密配置
+apiVersion: v1
+kind: Secret
+metadata:
+  name: etcd-secret
+  namespace: default
+type: Opaque
+data:
+  # TLS证书（base64编码）
+  ca.crt: LS0tLS1CRUdJTi...
+  server.crt: LS0tLS1CRUdJTi...
+  server.key: LS0tLS1CRUdJTi...
+  
+  # 集群认证token
+  cluster-token: ZXRjZC1jbHVzdGVyLXRva2Vu
+
+---
+# Deployment - 无状态服务部署
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: etcd-cluster
+  namespace: default
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: etcd
+  template:
+    metadata:
+      labels:
+        app: etcd
+    spec:
+      containers:
+      - name: etcd
+        image: alpine:3.18  # 基础镜像，应用通过HTTP下载
+        command: ["/bin/bash"]
+        args:
+        - -c
+        - |
+          # GitOps控制器会自动注入此启动脚本
+          # 下载启动脚本
+          wget -O /tmp/init.sh $DOWNLOAD_BASE_URL/scripts/etcd/init.sh
+          chmod +x /tmp/init.sh
+          
+          # 下载应用资源
+          mkdir -p /app
+          wget -O /app/app.tar.gz $DOWNLOAD_BASE_URL/apps/etcd/app.tar.gz
+          cd /app && tar -xzf app.tar.gz
+          
+          # 执行启动脚本
+          /tmp/init.sh
+        env:
+        - name: SERVICE_NAME
+          value: etcd
+        - name: CONFIG_PATH
+          value: /etc/config
+        - name: SECRET_PATH
+          value: /etc/secret
+        - name: DOWNLOAD_BASE_URL
+          valueFrom:
+            configMapKeyRef:
+              name: etcd-config
+              key: download_base_url
+        volumeMounts:
+        - name: config-volume
+          mountPath: /etc/config
+          readOnly: true
+        - name: secret-volume
+          mountPath: /etc/secret
+          readOnly: true
+        - name: tmp-volume
+          mountPath: /tmp
+          readOnly: false
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "1Gi" 
+            cpu: "500m"
+      volumes:
+      - name: config-volume
+        configMap:
+          name: etcd-config
+      - name: secret-volume
+        secret:
+          secretName: etcd-secret
+      - name: tmp-volume
+        emptyDir: {}
+
+---
+# Service - 服务暴露
+apiVersion: v1
+kind: Service
+metadata:
+  name: etcd-service
+  namespace: default
+spec:
+  selector:
+    app: etcd
+  ports:
+  - name: client
+    port: 2379
+    targetPort: 2379
+  - name: peer
+    port: 2380
+    targetPort: 2380
+  type: ClusterIP

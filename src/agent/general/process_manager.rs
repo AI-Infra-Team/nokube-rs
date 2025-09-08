@@ -3,7 +3,9 @@ use std::collections::HashMap;
 use anyhow::Result;
 use tracing::{info, error, warn};
 use tokio::signal;
+use super::docker_runner::{DockerRunner, DockerRunConfig};
 
+#[derive(Default)]
 pub struct ProcessManager {
     processes: HashMap<String, Child>,
     docker_containers: Vec<String>,
@@ -31,29 +33,126 @@ impl ProcessManager {
         Ok(())
     }
 
-    pub fn spawn_docker_container(&mut self, name: String, image: String, args: Vec<String>) -> Result<()> {
+    /// 直接使用DockerRunConfig创建容器方式 - 推荐使用
+    pub fn spawn_docker_container_with_config(&mut self, config: DockerRunConfig) -> Result<String> {
+        let container_name = config.container_name.clone();
+        info!("Starting Docker container with config: {}", container_name);
+        
+        match DockerRunner::run(&config) {
+            Ok(container_id) => {
+                self.docker_containers.push(container_name.clone());
+                info!("Container {} started with ID: {}", container_name, container_id);
+                Ok(container_id)
+            },
+            Err(e) => {
+                error!("Failed to start container {}: {}", container_name, e);
+                Err(e)
+            }
+        }
+    }
+
+    /// 兼容性方法 - 保持老接口，但使用新的DockerRunner
+    pub fn spawn_docker_container(&mut self, name: String, image: String, docker_options: Vec<String>, command_args: Option<Vec<String>>) -> Result<()> {
         info!("Starting Docker container: {}", name);
         
-        let mut command = Command::new("docker");
-        command.arg("run").arg("-d").arg("--name").arg(&name);
+        // 创建 DockerRunConfig
+        let mut config = DockerRunConfig::new(name.clone(), image);
         
-        for arg in args {
-            command.arg(arg);
+        // 解析 docker_options 来配置 DockerRunConfig
+        let mut i = 0;
+        while i < docker_options.len() {
+            let arg = &docker_options[i];
+            match arg.as_str() {
+                "-v" | "--volume" => {
+                    if i + 1 < docker_options.len() {
+                        let volume_spec = &docker_options[i + 1];
+                        if let Some((host_path, rest)) = volume_spec.split_once(':') {
+                            let (container_path, read_only) = if let Some((container_path, mode)) = rest.split_once(':') {
+                                (container_path, mode == "ro")
+                            } else {
+                                (rest, false)
+                            };
+                            config = config.add_volume(host_path.to_string(), container_path.to_string(), read_only);
+                        }
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                },
+                "-p" | "--publish" => {
+                    if i + 1 < docker_options.len() {
+                        let port_spec = &docker_options[i + 1];
+                        if let Some((host_port, container_port)) = port_spec.split_once(':') {
+                            if let (Ok(hp), Ok(cp)) = (host_port.parse::<u16>(), container_port.parse::<u16>()) {
+                                config = config.add_port(hp, cp);
+                            }
+                        }
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                },
+                "-e" | "--env" => {
+                    if i + 1 < docker_options.len() {
+                        let env_spec = &docker_options[i + 1];
+                        if let Some((key, value)) = env_spec.split_once('=') {
+                            config = config.add_env(key.to_string(), value.to_string());
+                        }
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                },
+                "--restart" => {
+                    if i + 1 < docker_options.len() {
+                        config = config.restart_policy(docker_options[i + 1].clone());
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                },
+                "-w" | "--workdir" => {
+                    if i + 1 < docker_options.len() {
+                        config = config.working_dir(docker_options[i + 1].clone());
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                },
+                "-u" | "--user" => {
+                    if i + 1 < docker_options.len() {
+                        config = config.user(docker_options[i + 1].clone());
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                },
+                "--network" => {
+                    if i + 1 < docker_options.len() {
+                        config = config.network(docker_options[i + 1].clone());
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                },
+                _ => {
+                    // 其他参数作为额外参数处理
+                    config.extra_args.push(arg.clone());
+                    i += 1;
+                }
+            }
         }
-        command.arg(image);
-
-        let output = command.output()?;
         
-        if !output.status.success() {
-            let error_msg = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("Failed to start container {}: {}", name, error_msg);
+        // 设置启动命令
+        if let Some(cmd_args) = command_args {
+            config = config.command(cmd_args);
         }
-
-        let container_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        self.docker_containers.push(name.clone());
         
-        info!("Container {} started with ID: {}", name, container_id);
-        Ok(())
+        // 使用 DockerRunner 运行容器
+        match self.spawn_docker_container_with_config(config) {
+            Ok(_) => Ok(()),
+            Err(e) => Err(e)
+        }
     }
 
     pub fn stop_process(&mut self, name: &str) -> Result<()> {
@@ -69,20 +168,13 @@ impl ProcessManager {
     pub fn stop_docker_container(&mut self, name: &str) -> Result<()> {
         info!("Stopping Docker container: {}", name);
         
-        let stop_output = Command::new("docker")
-            .args(&["stop", name])
-            .output()?;
-            
-        if !stop_output.status.success() {
-            warn!("Failed to stop container {}: {}", name, String::from_utf8_lossy(&stop_output.stderr));
+        // 使用 DockerRunner 停止和删除容器
+        if let Err(e) = DockerRunner::stop(name) {
+            warn!("Failed to stop container {}: {}", name, e);
         }
-
-        let rm_output = Command::new("docker")
-            .args(&["rm", name])
-            .output()?;
-            
-        if !rm_output.status.success() {
-            warn!("Failed to remove container {}: {}", name, String::from_utf8_lossy(&rm_output.stderr));
+        
+        if let Err(e) = DockerRunner::remove_container(name) {
+            warn!("Failed to remove container {}: {}", name, e);
         }
 
         self.docker_containers.retain(|c| c != name);

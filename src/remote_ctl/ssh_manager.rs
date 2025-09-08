@@ -77,9 +77,9 @@ impl SSHManager {
         let mut channel = sess.channel_session()?;
         let shell_cmd = if require_root && self.username != "root" {
             // 使用完整的sudo命令，确保环境变量传递和错误处理
-            format!("sudo -E bash -c '{}'", command.replace("'", "'\\''"))
+            format!("sudo -E {}", command)
         } else {
-            format!("bash -c '{}'", command.replace("'", "'\\''"))
+            command.to_string()
         };
         let cmd = shell_cmd;
         info!("Executing command on {}: {}", self.host, cmd);
@@ -128,6 +128,13 @@ impl SSHManager {
         Ok(output)
     }
 
+    /// 上传单个文件到远程路径。
+    ///
+    /// 约定与保障：
+    /// - 自动创建远程父目录（`mkdir -p <parent>`）
+    /// - 自动将目录归属设置为当前 SSH 用户（`chown -R <user>:<user> <parent>`）
+    /// - 如目标文件已存在，将先尝试删除（`rm -f`）
+    /// - 失败信息包含详细的 stdout/stderr 以便排障
     pub async fn upload_file(&self, local_path: &str, remote_path: &str) -> Result<()> {
         let sess = self.connect().await
             .map_err(|e| anyhow::anyhow!("Failed to establish SSH connection to {}: {}", self.host, e))?;
@@ -179,6 +186,85 @@ impl SSHManager {
         Ok(())
     }
 
+    /// 强制上传单个文件，先删除远程文件再上传（确保更新）。
+    ///
+    /// 约定与保障：
+    /// - 自动创建远程父目录（`mkdir -p <parent>`）
+    /// - 自动将目录归属设置为当前 SSH 用户（`chown -R <user>:<user> <parent>`）
+    /// - 先执行 `rm -f <remote_path>` 确保替换
+    /// - 若是 `nokube` 二进制，自动 `chmod +x`
+    pub async fn force_upload_file(&self, local_path: &str, remote_path: &str) -> Result<()> {
+        let sess = self.connect().await
+            .map_err(|e| anyhow::anyhow!("Failed to establish SSH connection to {}: {}", self.host, e))?;
+        let sftp = sess.sftp()
+            .map_err(|e| anyhow::anyhow!("Failed to establish SFTP session with {}: {:?}", self.host, e))?;
+
+        info!(
+            "Force uploading file {} to {}:{} (will delete existing file first)",
+            local_path, self.host, remote_path
+        );
+
+        // 自动创建远程父目录并修正权限
+        if let Some(parent) = Path::new(remote_path).parent() {
+            let parent_str = parent.to_str().unwrap_or("");
+            if !parent_str.is_empty() {
+                // 创建目录
+                self.execute_command(&format!("mkdir -p {}", parent_str), true, true)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to create parent directory {}: {}", parent_str, e))?;
+                // 修正权限
+                self.execute_command(
+                    &format!(
+                        "chown -R {}:{} {}",
+                        self.username, self.username, parent_str
+                    ),
+                    true,
+                    true,
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to set ownership for directory {}: {}", parent_str, e))?;
+            }
+        }
+
+        // 强制删除远程文件（包括只读文件）
+        info!("Forcefully removing existing file at {}:{}", self.host, remote_path);
+        let delete_result = self.execute_command(&format!("rm -f {}", remote_path), true, true).await;
+        match delete_result {
+            Ok(_) => info!("Successfully deleted existing file at {}:{}", self.host, remote_path),
+            Err(e) => info!("File deletion failed (file may not exist): {}", e),
+        }
+
+        // 读取本地文件内容
+        let local_content = std::fs::read(local_path)
+            .map_err(|e| anyhow::anyhow!("Failed to read local file {}: {}", local_path, e))?;
+        
+        info!("Read {} bytes from local file {}", local_content.len(), local_path);
+        
+        // 创建新的远程文件
+        let mut remote_file = sftp.create(Path::new(remote_path))
+            .map_err(|e| anyhow::anyhow!("Failed to create remote file {} on {}: SFTP error: {:?}", remote_path, self.host, e))?;
+        
+        std::io::Write::write_all(&mut remote_file, &local_content)
+            .map_err(|e| anyhow::anyhow!("Failed to write {} bytes to remote file {} on {}: {}", local_content.len(), remote_path, self.host, e))?;
+
+        // 设置可执行权限（如果是二进制文件）
+        if remote_path.ends_with("/nokube") || remote_path.ends_with("nokube") {
+            info!("Setting executable permission for nokube binary");
+            self.execute_command(&format!("chmod +x {}", remote_path), true, true)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to set executable permission for {}: {}", remote_path, e))?;
+        }
+
+        info!("Successfully force uploaded {} bytes to {}:{}", local_content.len(), self.host, remote_path);
+        Ok(())
+    }
+
+    /// 递归上传目录到远程路径。
+    ///
+    /// 约定与保障：
+    /// - 自动创建远程目录（含父目录）并 `chown -R <user>:<user>` 到当前 SSH 用户
+    /// - 每个文件覆盖上传前先尝试 `rm -f`
+    /// - 上传完成后统一 `chown -R` 与 `chmod -R 700`，并确保 `nokube` 可执行
     pub async fn upload_directory(
         &self,
         local_dir: &str,

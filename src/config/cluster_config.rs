@@ -35,6 +35,8 @@ pub struct NodeConfig {
     pub users: Vec<UserConfig>,
     pub proxy: Option<ProxyConfig>,
     pub workspace: Option<String>,
+    /// 可选：为该节点配置APT源
+    pub apt_sources: Option<AptSourcesConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -54,6 +56,14 @@ pub struct ProxyConfig {
     pub http_proxy: Option<String>,
     pub https_proxy: Option<String>,
     pub no_proxy: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AptSourcesConfig {
+    /// 完整替换 /etc/apt/sources.list 的内容
+    pub sources_list: Option<String>,
+    /// 在 /etc/apt/sources.list.d/ 下新增的源文件集合（文件名 -> 内容）
+    pub sources_list_d: Option<HashMap<String, String>>, 
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -82,11 +92,15 @@ pub struct MonitoringConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GrafanaConfig {
     pub port: u16,
+    pub admin_user: Option<String>,
+    pub admin_password: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GreptimeDbConfig {
     pub port: u16,
+    pub mysql_user: Option<String>,
+    pub mysql_password: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -98,12 +112,22 @@ pub struct NokubeSpecificConfig {
 
 impl NodeConfig {
     /// 从 SSH URL 中提取节点的 IP 地址
-    /// 例如: "192.168.1.100:22" -> "192.168.1.100"
+    /// 例如: "pa@192.168.1.100:22" -> "192.168.1.100"
+    /// 或者: "192.168.1.100:22" -> "192.168.1.100" 
     pub fn get_ip(&self) -> anyhow::Result<&str> {
-        self.ssh_url
-            .split(':')
-            .next()
-            .ok_or_else(|| anyhow::anyhow!("Invalid SSH URL format: {}", self.ssh_url))
+        // 首先检查是否包含@符号
+        let host_part = if self.ssh_url.contains('@') {
+            self.ssh_url.split('@').nth(1)
+                .ok_or_else(|| anyhow::anyhow!("Invalid SSH URL format after @: {}", self.ssh_url))?
+        } else {
+            &self.ssh_url
+        };
+        
+        // 然后从主机部分提取IP（去掉端口）
+        let ip = host_part.split(':').next()
+            .ok_or_else(|| anyhow::anyhow!("Invalid host format in SSH URL: {}", self.ssh_url))?;
+            
+        Ok(ip)
     }
 
     /// 获取节点的工作空间路径，如果未指定则报错
@@ -137,8 +161,8 @@ impl ClusterConfig {
             task_spec: TaskSpec {
                 version: "1.0".to_string(),
                 monitoring: MonitoringConfig {
-                    grafana: GrafanaConfig { port: 3000 },
-                    greptimedb: GreptimeDbConfig { port: 4000 },
+                    grafana: GrafanaConfig { port: 3000, admin_user: None, admin_password: None },
+                    greptimedb: GreptimeDbConfig { port: 4000, mysql_user: None, mysql_password: None },
                     enabled: true,
                 },
             },

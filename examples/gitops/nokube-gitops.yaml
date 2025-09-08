@@ -1,0 +1,171 @@
+apiVersion: nokube.io/v1
+kind: Secret
+metadata:
+  name: gitops-config
+  namespace: default
+data:
+  # GitHub Personal Access Token
+  github-token: "your-github-token-here"
+  
+  # GitOps配置
+  gitops-config.json: |
+    {
+      "repo_owner": "your-org",
+      "repo_name": "gitops-config",
+      "branch": "main",
+      "target_files": [
+        "deployments/web-app.yaml",
+        "configs/database-config.json",
+        "services/api-gateway.yaml",
+        "monitoring/alerts.yaml"
+      ],
+      "poll_interval": 60,
+      "webhook_url": "https://api.yourorg.com/webhooks/gitops"
+    }
+
+---
+apiVersion: nokube.io/v1
+kind: ConfigMap
+metadata:
+  name: gitops-scripts
+  namespace: default
+data:
+  requirements.txt: |
+    requests==2.31.0
+    PyYAML==6.0.1
+    gitpython==3.1.40
+  
+  install-deps.sh: |
+    #!/bin/bash
+    set -e
+    echo "Installing system dependencies..."
+    apt-get update && apt-get install -y git curl
+    echo "Installing Python dependencies..."
+    pip install -r /workspace/config/requirements.txt
+    echo "Dependencies installed successfully"
+
+---
+apiVersion: nokube.io/v1
+kind: DaemonSet
+metadata:
+  name: gitops-controller
+  namespace: default
+spec:
+  # NodeAffinity - 只在管理节点运行
+  nodeAffinity:
+    required:
+    - matchExpressions:
+      - key: "node-role.nokube.io/management"
+        operator: "In"
+        values: ["true"]
+    preferred:
+    - weight: 100
+      preference:
+        matchExpressions:
+        - key: "zone"
+          operator: "In"
+          values: ["control-plane"]
+  
+  # Pod模板
+  template:
+    # 容器规格
+    containerSpec:
+      name: gitops-controller
+      image: python:3.10-slim
+      
+      # 启动命令
+      command: ["/bin/bash"]
+      args: ["-c", "/workspace/config/install-deps.sh && python /workspace/scripts/gitops-controller.py"]
+      
+      # 环境变量
+      env:
+        PYTHONPATH: "/workspace/scripts"
+        PYTHONUNBUFFERED: "1"
+        TZ: "UTC"
+        NOKUBE_WORKSPACE: "/workspace"
+        
+      # 挂载点
+      volumeMounts:
+      - name: scripts
+        mountPath: /workspace/scripts
+        readOnly: false
+      
+      - name: config
+        mountPath: /workspace/config
+        readOnly: true
+        
+      - name: secret
+        mountPath: /workspace/secret
+        readOnly: true
+    
+    # 数据卷配置
+    volumes:
+    - name: scripts
+      hostPath: 
+        path: "{{.workspace}}/gitops/scripts"
+        type: DirectoryOrCreate
+        
+    - name: config
+      configMap:
+        name: gitops-scripts
+        
+    - name: secret
+      secret:
+        name: gitops-config
+
+---
+apiVersion: nokube.io/v1
+kind: Deployment
+metadata:
+  name: gitops-webhook-server
+  namespace: default
+spec:
+  replicas: 2
+  
+  # NodeAffinity - 可以在任何工作节点运行
+  nodeAffinity:
+    preferred:
+    - weight: 50
+      preference:
+        matchExpressions:
+        - key: "node-role.nokube.io/worker"
+          operator: "In"
+          values: ["true"]
+  
+  # Pod模板
+  template:
+    # 容器规格
+    containerSpec:
+      name: webhook-server
+      image: python:3.10-slim
+      
+      # 启动命令
+      command: ["/bin/bash"]
+      args: ["-c", "pip install flask requests && python /workspace/scripts/webhook-server.py"]
+      
+      # 环境变量  
+      env:
+        FLASK_HOST: "0.0.0.0"
+        FLASK_PORT: "8080"
+        NOKUBE_WORKSPACE: "/workspace"
+        
+      # 挂载点
+      volumeMounts:
+      - name: scripts
+        mountPath: /workspace/scripts
+        readOnly: false
+        
+      - name: webhook-config
+        mountPath: /workspace/config
+        readOnly: true
+    
+    # 数据卷配置
+    volumes:
+    - name: scripts
+      hostPath:
+        path: "{{.workspace}}/gitops/webhook"
+        type: DirectoryOrCreate
+        
+    - name: webhook-config
+      configMap:
+        name: webhook-config

@@ -75,7 +75,7 @@ impl RemoteExecutor {
         let temp_file = "/tmp/nokube_script.sh";
         std::fs::write(temp_file, script_content)?;
         
-        let mut cmd = Command::new("bash");
+        let mut cmd = Command::new("sh");
         cmd.arg(temp_file);
         self.apply_proxy_env(&mut cmd);
         

@@ -12,18 +12,49 @@ pub struct NokubeConfig {
     pub etcd_endpoints: Vec<String>,
 }
 
+#[derive(Debug)]
 pub struct ConfigManager {
     etcd_manager: EtcdManager,
     etcd_endpoints: Vec<String>,
 }
 
 impl ConfigManager {
+    /// 返回已存在的本地配置文件路径：优先用户级 (~/.nokube/config.yaml)，其次全局级 (/etc/.nokube/config.yaml)。
+    /// 若均不存在，返回 None。
+    pub fn try_get_existing_local_config_path() -> Option<PathBuf> {
+        // 用户级配置
+        if let Ok(home_dir) = std::env::var("HOME") {
+            let user_path = PathBuf::from(format!("{}/.nokube/config.yaml", home_dir));
+            if user_path.exists() {
+                return Some(user_path);
+            }
+        }
+        // 全局级配置
+        let global_path = PathBuf::from("/etc/.nokube/config.yaml");
+        if global_path.exists() {
+            return Some(global_path);
+        }
+        None
+    }
+
+    /// 基于当前 ConfigManager 的 etcd_endpoints 生成最小可用配置的 YAML 文本。
+    pub fn generate_minimal_config_yaml(&self) -> String {
+        let mut yaml = String::from("etcd_endpoints:\n");
+        for ep in &self.etcd_endpoints {
+            yaml.push_str(&format!("  - '{}'\n", ep));
+        }
+        yaml
+    }
     pub async fn get_cluster_config(&self, cluster_name: &str) -> Result<Option<ClusterConfig>> {
         self.etcd_manager.get_cluster_config(cluster_name).await
     }
 
     pub fn get_etcd_endpoints(&self) -> Vec<String> {
         self.etcd_endpoints.clone()
+    }
+
+    pub fn get_etcd_manager(&self) -> &EtcdManager {
+        &self.etcd_manager
     }
     pub async fn new() -> Result<Self> {
         tracing::info!("Loading nokube configuration...");
@@ -40,52 +71,20 @@ impl ConfigManager {
     }
 
     fn load_nokube_config() -> Result<NokubeConfig> {
-        let mut configs_found = Vec::new();
-        
-        // Try global config first
-        let global_config_path = PathBuf::from("/etc/.nokube/config.yaml");
-        if global_config_path.exists() {
-            configs_found.push(("Global", global_config_path.clone()));
-        }
-
-        // Try user-level config
-        let user_config_path = if let Ok(home_dir) = std::env::var("HOME") {
-            let path = PathBuf::from(format!("{}/.nokube/config.yaml", home_dir));
-            if path.exists() {
-                configs_found.push(("User", path.clone()));
-                Some(path)
-            } else {
-                None
-            }
+        // 优先使用用户级配置，其次全局级配置
+        let config_to_use = if let Some(path) = Self::try_get_existing_local_config_path() {
+            tracing::info!("Using discovered config: {}", path.display());
+            path
         } else {
-            None
-        };
-
-        // Log discovered configs
-        tracing::info!("Nokube config discovery: found {} config(s)", configs_found.len());
-        for (config_type, path) in &configs_found {
-            tracing::info!("  {} config: {}", config_type, path.display());
-        }
-
-        // Use user config if available (higher priority), otherwise global
-        let config_to_use = if let Some(user_path) = user_config_path {
-            tracing::info!("Using user config (higher priority): {}", user_path.display());
-            user_path
-        } else if global_config_path.exists() {
-            tracing::info!("Using global config: {}", global_config_path.display());
-            global_config_path
-        } else {
-                        anyhow::bail!(
-                                "Nokube configuration not found. Please create config at:\n\
-                                 - Global: /etc/.nokube/config.yaml\n\
-                                 - User: ~/.nokube/config.yaml\n\
-                                 \n\
-                                 Example config:\n\
-                                 etcd_endpoints:\n\
-                                     - '127.0.0.1:2379'"
-                        );
-
-            
+            anyhow::bail!(
+                "Nokube configuration not found. Please create config at:\n\
+                 - Global: /etc/.nokube/config.yaml\n\
+                 - User: ~/.nokube/config.yaml\n\
+                 \n\
+                 Example config:\n\
+                 etcd_endpoints:\n\
+                     - 'http://127.0.0.1:2379'"
+            );
         };
 
         let content = fs::read_to_string(&config_to_use)
@@ -115,5 +114,26 @@ impl ConfigManager {
 
     pub async fn update_cluster_config(&self, config: &ClusterConfig) -> Result<()> {
         self.etcd_manager.store_cluster_config(config).await
+    }
+
+    // K8s对象存储方法
+    pub async fn store_deployment(&self, cluster_name: &str, name: &str, yaml_content: &str) -> Result<()> {
+        let key = format!("/nokube/{}/deployments/{}", cluster_name, name);
+        self.etcd_manager.put(key, yaml_content.to_string()).await
+    }
+
+    pub async fn store_daemonset(&self, cluster_name: &str, name: &str, yaml_content: &str) -> Result<()> {
+        let key = format!("/nokube/{}/daemonsets/{}", cluster_name, name);
+        self.etcd_manager.put(key, yaml_content.to_string()).await
+    }
+
+    pub async fn store_configmap(&self, cluster_name: &str, name: &str, yaml_content: &str) -> Result<()> {
+        let key = format!("/nokube/{}/configmaps/{}", cluster_name, name);
+        self.etcd_manager.put(key, yaml_content.to_string()).await
+    }
+
+    pub async fn store_secret(&self, cluster_name: &str, name: &str, yaml_content: &str) -> Result<()> {
+        let key = format!("/nokube/{}/secrets/{}", cluster_name, name);
+        self.etcd_manager.put(key, yaml_content.to_string()).await
     }
 }

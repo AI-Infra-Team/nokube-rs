@@ -1,0 +1,127 @@
+apiVersion: nokube.io/v1
+kind: GitOpsCluster
+metadata:
+  name: gitops-home-cluster
+  namespace: default
+spec:
+  clusterName: home-cluster
+  configMap:
+    data:
+      gitops-config.json: "{\n  \"github_configs\": [\n    {\n      \"repo_owner\"\
+        : \"AI-Infra-Team\",\n      \"repo_name\": \"gitops-config\",\n      \"branch\"\
+        : \"main\",\n      \"token\": \"ghp_your_github_token_here\"\n    }\n  ],\n\
+        \  \"services\": [\n    {\n      \"name\": \"etcd\",\n      \"repo\": \"https://github.com/AI-Infra-Team/nokube\"\
+        ,\n      \"k8s_yaml_dir\": \"examples/etcd\"\n    },\n    {\n      \"name\"\
+        : \"monitoring\",\n      \"repo\": \"https://github.com/AI-Infra-Team/nokube\"\
+        ,\n      \"k8s_yaml_dir\": \"examples/monitoring\"\n    }\n  ],\n  \"poll_interval\"\
+        : 60,\n  \"webhook_url\": \"https://api.yourorg.com/webhooks/gitops\"\n}"
+      gitops-controller.py: "#!/usr/bin/env python3\nimport json\nimport os\nimport\
+        \ sys\nimport time\nimport requests\nfrom typing import Dict, List, Optional\n\
+        \n# \u914D\u7F6E\u65E5\u5FD7\nimport logging\nlogging.basicConfig(\n    level=logging.INFO,\n\
+        \    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'\n)\nlogger\
+        \ = logging.getLogger('gitops-controller')\n\nclass GitOpsController:\n  \
+        \  \"\"\"\u65E0\u72B6\u6001GitOps\u63A7\u5236\u5668\"\"\"\n    \n    def __init__(self,\
+        \ config_path: str):\n        # \u8BFB\u53D6\u914D\u7F6E\n        with open(config_path,\
+        \ 'r') as f:\n            self.config = json.load(f)\n        \n        #\
+        \ \u5185\u5B58\u72B6\u6001\n        self.current_state = {}\n        \n  \
+        \      logger.info(f\"GitOps Controller initialized for {len(self.config['services'])}\
+        \ services\")\n    \n    def run(self):\n        \"\"\"\u4E3B\u5FAA\u73AF\"\
+        \"\"\n        poll_interval = self.config.get('poll_interval', 60)\n     \
+        \   \n        while True:\n            try:\n                logger.info(\"\
+        Checking for changes...\")\n                changes = self.check_file_changes()\n\
+        \                \n                if changes:\n                    logger.info(f\"\
+        Found {len(changes)} changes\")\n                    self.trigger_deployment(changes)\n\
+        \                else:\n                    logger.info(\"No changes detected\"\
+        )\n                    \n            except Exception as e:\n            \
+        \    logger.error(f\"Error in main loop: {e}\")\n            \n          \
+        \  time.sleep(poll_interval)\n    \n    def check_file_changes(self) -> List[Dict]:\n\
+        \        \"\"\"\u68C0\u67E5\u6587\u4EF6\u53D8\u5316\uFF08\u7B80\u5316\u7248\
+        \u672C\uFF09\"\"\"\n        # \u8FD9\u91CC\u662F\u7B80\u5316\u7684\u68C0\u67E5\
+        \u903B\u8F91\n        logger.info(\"Checking GitHub repositories for changes...\"\
+        )\n        return []\n    \n    def trigger_deployment(self, changes: List[Dict]):\n\
+        \        \"\"\"\u89E6\u53D1\u90E8\u7F72\"\"\"\n        for change in changes:\n\
+        \            logger.info(f\"Processing change: {change}\")\n            #\
+        \ \u8C03\u7528NoKube API\n            self.call_nokube_api(change)\n    \n\
+        \    def call_nokube_api(self, change: Dict):\n        \"\"\"\u8C03\u7528\
+        NoKube API\"\"\"\n        api_url = os.getenv('NOKUBE_API_URL', 'http://nokube-api:8080')\n\
+        \        logger.info(f\"Calling NoKube API: {api_url}\")\n\nif __name__ ==\
+        \ \"__main__\":\n    controller = GitOpsController(\"/etc/config/gitops-config.json\"\
+        )\n    controller.run()\n"
+      requirements.txt: 'requests==2.31.0
+
+        PyYAML==6.0.1
+
+        flask==2.3.2'
+      webhook-server.py: "#!/usr/bin/env python3\nfrom flask import Flask, request,\
+        \ jsonify\nimport logging\nimport os\n\nlogging.basicConfig(level=logging.INFO)\n\
+        logger = logging.getLogger('webhook-server')\n\napp = Flask(__name__)\n\n\
+        @app.route('/webhook', methods=['POST'])\ndef webhook():\n    \"\"\"\u63A5\
+        \u6536Webhook\u4E8B\u4EF6\"\"\"\n    try:\n        data = request.json\n \
+        \       logger.info(f\"Received webhook: {data}\")\n        \n        # \u5904\
+        \u7406GitOps\u4E8B\u4EF6\n        if data and 'event' in data:\n         \
+        \   event_type = data['event']\n            logger.info(f\"Processing event:\
+        \ {event_type}\")\n        \n        return jsonify({\"status\": \"ok\", \"\
+        message\": \"Event processed\"})\n    \n    except Exception as e:\n     \
+        \   logger.error(f\"Error processing webhook: {e}\")\n        return jsonify({\"\
+        status\": \"error\", \"message\": str(e)}), 500\n\n@app.route('/health', methods=['GET'])\n\
+        def health():\n    \"\"\"\u5065\u5EB7\u68C0\u67E5\"\"\"\n    return jsonify({\"\
+        status\": \"healthy\"})\n\nif __name__ == \"__main__\":\n    host = os.getenv('FLASK_HOST',\
+        \ '0.0.0.0')\n    port = int(os.getenv('FLASK_PORT', '8080'))\n    app.run(host=host,\
+        \ port=port, debug=False)\n"
+    name: gitops-scripts-home-cluster
+  deployment:
+    containerSpec:
+      args:
+      - -c
+      - pip install -r /etc/config/requirements.txt && python /etc/config/gitops-controller.py
+      command:
+      - /bin/bash
+      env:
+        NOKUBE_API_URL: http://nokube-api:8080
+        PYTHONUNBUFFERED: '1'
+        TZ: UTC
+      image: python:3.10-slim
+      name: gitops-controller
+      volumeMounts:
+      - mountPath: /etc/config
+        name: config-volume
+        readOnly: true
+    name: gitops-controller-home-cluster
+    nodeAffinity:
+      preferred:
+      - preference:
+          matchExpressions:
+          - key: node-role.nokube.io/management
+            operator: In
+            values:
+            - 'true'
+        weight: 100
+    replicas: 1
+  webhookDeployment:
+    containerSpec:
+      args:
+      - -c
+      - pip install -r /etc/config/requirements.txt && python /etc/config/webhook-server.py
+      command:
+      - /bin/bash
+      env:
+        FLASK_HOST: 0.0.0.0
+        FLASK_PORT: '8080'
+        PYTHONUNBUFFERED: '1'
+      image: python:3.10-slim
+      name: webhook-server
+      volumeMounts:
+      - mountPath: /etc/config
+        name: config-volume
+        readOnly: true
+    name: gitops-webhook-server-home-cluster
+    nodeAffinity:
+      preferred:
+      - preference:
+          matchExpressions:
+          - key: node-role.nokube.io/worker
+            operator: In
+            values:
+            - 'true'
+        weight: 50
+    replicas: 2

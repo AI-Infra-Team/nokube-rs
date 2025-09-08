@@ -1,0 +1,46 @@
+# NoKube GitOps Example Configuration
+
+# 1. GitHub仓库配置示例
+github_configs:
+- repo_owner: "AI-Infra-Team"
+  repo_name: "gitops-config"
+  branch: "main"
+  token: "ghp_your_github_token_here"
+
+# 2. 服务配置 - 确保无状态服务设计
+services:
+  - name: etcd
+    repo: https://github.com/AI-Infra-Team/nokube
+    k8s_yaml_dir: examples/etcd
+    # 配置说明：
+    # - ConfigMap存储配置文件 (etcd-config)
+    # - Secret存储私密信息 (etcd-secret) 
+    # - 应用二进制通过HTTP下载
+    
+  - name: monitoring
+    repo: https://github.com/AI-Infra-Team/nokube
+    k8s_yaml_dir: examples/monitoring
+    # 配置说明：
+    # - ConfigMap存储Grafana配置 (monitoring-config)
+    # - Secret存储数据库密码等 (monitoring-secret)
+    # - Grafana镜像和插件通过HTTP下载
+
+# 3. 轮询和通知配置
+poll_interval: 60
+webhook_url: "https://api.yourorg.com/webhooks/gitops"
+
+# 4. HTTP下载服务配置
+download_config:
+  base_url: "https://releases.example.com"
+  # 目录结构：
+  # /scripts/{service_name}/init.sh - 启动脚本
+  # /apps/{service_name}/app.tar.gz - 应用资源包
+  # /configs/{service_name}/ - 配置模板
+  
+# 5. 无状态服务设计原则：
+# - 所有配置通过ConfigMap管理
+# - 私密信息通过Secret管理  
+# - 应用二进制和资源通过HTTP下载
+# - 容器启动时自动下载所需资源
+# - 不依赖宿主机文件系统
+# - 支持完全的容器迁移

@@ -1,0 +1,216 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: gitops-config
+  namespace: nokube-system
+type: Opaque
+data:
+  # GitHub Personal Access Token (base64 encoded)
+  github-token: Z2hwX1RoaXNJc0FEZW1vVG9rZW5SZXBsYWNlV2l0aFlvdXJzCg==
+  # GitOps配置文件 (base64 encoded JSON)
+  gitops-config.json: ewogICJyZXBvX293bmVyIjogIm15LW9yZyIsCiAgInJlcG9fbmFtZSI6ICJnaXRvcHMtY29uZmlnIiwKICAiYnJhbmNoIjogIm1haW4iLAogICJ0YXJnZXRfZmlsZXMiOiBbCiAgICAiZGVwbG95bWVudHMvYXBwLnlhbWwiLAogICAgImNvbmZpZ3MvYXBwLWNvbmZpZy5qc29uIiwKICAgICJzZXJ2aWNlcy9kYXRhYmFzZS55YW1sIgogIF0sCiAgInBvbGxfaW50ZXJ2YWwiOiA2MCwKICAid2ViaG9va191cmwiOiAiaHR0cHM6Ly9hcGkubXlvcmcuY29tL3dlYmhvb2tzL2dpdG9wcyIKfQo=
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gitops-scripts
+  namespace: nokube-system
+data:
+  requirements.txt: |
+    requests==2.31.0
+    PyYAML==6.0.1
+  
+  entrypoint.sh: |
+    #!/bin/bash
+    set -e
+    
+    echo "Installing Python dependencies..."
+    pip install -r /scripts/requirements.txt
+    
+    echo "Starting GitOps controller..."
+    python /scripts/gitops-controller.py
+
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: gitops-controller
+  namespace: nokube-system
+  labels:
+    app: gitops-controller
+    component: automation
+spec:
+  selector:
+    matchLabels:
+      app: gitops-controller
+  template:
+    metadata:
+      labels:
+        app: gitops-controller
+        component: automation
+    spec:
+      # 节点选择器 - 只在管理节点运行
+      nodeSelector:
+        role: management
+      
+      # 容忍管理节点的污点
+      tolerations:
+      - key: "node-role.nokube.io/management"
+        operator: "Equal"
+        value: "true"
+        effect: "NoSchedule"
+      
+      containers:
+      - name: gitops-controller
+        image: python:3.10-slim
+        
+        # 启动命令
+        command: ["/bin/bash"]
+        args: ["/scripts/entrypoint.sh"]
+        
+        # 环境变量
+        env:
+        - name: PYTHONPATH
+          value: "/scripts"
+        - name: PYTHONUNBUFFERED
+          value: "1"
+        - name: TZ
+          value: "UTC"
+        
+        # 资源限制
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        
+        # 挂载点
+        volumeMounts:
+        # GitOps脚本
+        - name: scripts
+          mountPath: /scripts
+          readOnly: true
+        
+        # GitOps配置和token
+        - name: gitops-config
+          mountPath: /pod-workspace/secret
+          readOnly: true
+        
+        # 工作空间（持久化状态和部署文件）
+        - name: workspace
+          mountPath: /pod-workspace
+        
+        # 健康检查
+        livenessProbe:
+          exec:
+            command:
+            - /bin/bash
+            - -c
+            - "ps aux | grep -v grep | grep gitops-controller.py"
+          initialDelaySeconds: 60
+          periodSeconds: 30
+          timeoutSeconds: 10
+        
+        readinessProbe:
+          exec:
+            command:
+            - /bin/bash
+            - -c
+            - "test -f /pod-workspace/gitops-state.json"
+          initialDelaySeconds: 30
+          periodSeconds: 10
+      
+      # 数据卷
+      volumes:
+      # GitOps脚本配置
+      - name: scripts
+        configMap:
+          name: gitops-scripts
+          defaultMode: 0755
+          items:
+          - key: gitops-controller.py
+            path: gitops-controller.py
+            mode: 0755
+          - key: requirements.txt
+            path: requirements.txt
+          - key: entrypoint.sh
+            path: entrypoint.sh
+            mode: 0755
+      
+      # GitOps配置和密钥
+      - name: gitops-config
+        secret:
+          secretName: gitops-config
+          defaultMode: 0600
+      
+      # 工作空间（使用主机路径持久化）
+      - name: workspace
+        hostPath:
+          path: /opt/nokube/gitops-workspace
+          type: DirectoryOrCreate
+      
+      # 重启策略
+      restartPolicy: Always
+      
+      # 服务账号（如果需要访问k8s API）
+      serviceAccountName: gitops-controller
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: gitops-controller
+  namespace: nokube-system
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: gitops-controller
+rules:
+# 读取和创建资源的权限
+- apiGroups: [""]
+  resources: ["pods", "services", "configmaps", "secrets"]
+  verbs: ["get", "list", "create", "update", "patch", "delete"]
+
+- apiGroups: ["apps"]
+  resources: ["deployments", "daemonsets", "replicasets"]
+  verbs: ["get", "list", "create", "update", "patch", "delete"]
+
+- apiGroups: ["networking.k8s.io"]
+  resources: ["ingresses"]
+  verbs: ["get", "list", "create", "update", "patch", "delete"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: gitops-controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: gitops-controller
+subjects:
+- kind: ServiceAccount
+  name: gitops-controller
+  namespace: nokube-system
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gitops-controller
+  namespace: nokube-system
+  labels:
+    app: gitops-controller
+spec:
+  type: ClusterIP
+  ports:
+  - port: 8080
+    targetPort: 8080
+    name: http
+  selector:
+    app: gitops-controller

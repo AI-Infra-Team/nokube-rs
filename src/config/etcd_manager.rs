@@ -10,6 +10,14 @@ pub struct EtcdManager {
     client: Client,
 }
 
+impl std::fmt::Debug for EtcdManager {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EtcdManager")
+            .field("client", &"<etcd client>")
+            .finish()
+    }
+}
+
 impl EtcdManager {
     pub async fn store_cluster_meta(
         &self,
@@ -157,6 +165,43 @@ impl EtcdManager {
         let req = DeleteRequest::new(key);
         self.client.delete(req).await?;
         tracing::info!("Deleted cluster config for {}", cluster_name);
+        Ok(())
+    }
+    
+    /// 通用的etcd PUT操作
+    pub async fn put(&self, key: String, value: String) -> Result<()> {
+        let req = PutRequest::new(key, value);
+        self.client.put(req).await?;
+        Ok(())
+    }
+    
+    /// 通用的etcd GET操作
+    pub async fn get(&self, key: String) -> Result<Vec<etcd_rs::KeyValue>> {
+        let req = RangeRequest::new(KeyRange::key(key));
+        let resp = self.client.get(req).await?;
+        Ok(resp.kvs)
+    }
+    
+    /// 通用的etcd GET操作（支持前缀查询）
+    pub async fn get_prefix(&self, prefix: String) -> Result<Vec<etcd_rs::KeyValue>> {
+        let req = RangeRequest::new(KeyRange::prefix(prefix));
+        let resp = self.client.get(req).await?;
+        Ok(resp.kvs)
+    }
+    
+    /// 根据前缀获取所有keys
+    pub async fn get_keys_with_prefix(&self, prefix: String) -> Result<Vec<String>> {
+        let kvs = self.get_prefix(prefix).await?;
+        let keys: Vec<String> = kvs.iter()
+            .map(|kv| kv.key_str().to_string())
+            .collect();
+        Ok(keys)
+    }
+    
+    /// 通用的etcd DELETE操作
+    pub async fn delete(&self, key: String) -> Result<()> {
+        let req = DeleteRequest::new(key);
+        self.client.delete(req).await?;
         Ok(())
     }
 }

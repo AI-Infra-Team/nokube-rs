@@ -98,63 +98,133 @@ impl DeploymentController {
     }
 
     async fn prepare_dependencies(&self) -> Result<()> {
-        info!("Preparing binary dependencies and resources");
+        info!("Preparing binary dependencies and Docker image");
 
-        // This would involve:
-        // 1. Downloading required binary dependencies
-        // 2. Preparing installation scripts
-        // 3. Packaging remote_lib for distribution
+        // 1. 构建包含Docker的nokube镜像
+        self.build_nokube_docker_image().await?;
 
-        // 使用当前目录下的临时文件夹，不使用系统 /tmp
+        // 2. 准备传统的远程lib目录结构（兼容性）
         let local_staging_dir = "./tmp/nokube-remote-lib";
-        
-        // Create local staging directory structure
         std::fs::create_dir_all(local_staging_dir)
             .map_err(|e| anyhow::anyhow!("Failed to create directory {}: {}", local_staging_dir, e))?;
 
-        // 复制 libcrypto.so.1.1 到待上传目录（如存在）
-        let libcrypto_src = "target/libcrypto.so.1.1";
-        let libcrypto_dst = format!("{}/libcrypto.so.1.1", local_staging_dir);
-        if std::path::Path::new(libcrypto_src).exists() {
-            std::fs::copy(libcrypto_src, &libcrypto_dst)
-                .map_err(|e| anyhow::anyhow!("Failed to copy {} to {}: {}", libcrypto_src, libcrypto_dst, e))?;
+        // 复制SSL库（如存在）
+        for lib in &["libcrypto.so.1.1", "libssl.so.1.1"] {
+            let lib_src = format!("target/{}", lib);
+            let lib_dst = format!("{}/{}", local_staging_dir, lib);
+            if std::path::Path::new(&lib_src).exists() {
+                std::fs::copy(&lib_src, &lib_dst)
+                    .map_err(|e| anyhow::anyhow!("Failed to copy {} to {}: {}", lib_src, lib_dst, e))?;
+            }
         }
-        // 复制二进制文件到待上传目录
+
+        // 复制二进制文件
         let nokube_dst = format!("{}/nokube", local_staging_dir);
         std::fs::copy("target/nokube", &nokube_dst)
             .map_err(|e| anyhow::anyhow!("Failed to copy target/nokube to {}: {}", nokube_dst, e))?;
-        // 复制 libssl.so.1.1 到待上传目录（如存在）
-        let libssl_src = "target/libssl.so.1.1";
-        let libssl_dst = format!("{}/libssl.so.1.1", local_staging_dir);
-        if std::path::Path::new(libssl_src).exists() {
-            std::fs::copy(libssl_src, &libssl_dst)
-                .map_err(|e| anyhow::anyhow!("Failed to copy {} to {}: {}", libssl_src, libssl_dst, e))?;
+
+        info!("Dependencies and Docker image prepared");
+        Ok(())
+    }
+
+    async fn build_nokube_docker_image(&self) -> Result<()> {
+        info!("Building Docker-enabled nokube image");
+
+        // 创建临时Dockerfile目录
+        let dockerfile_dir = "./tmp/nokube-docker-build";
+        std::fs::create_dir_all(dockerfile_dir)
+            .map_err(|e| anyhow::anyhow!("Failed to create Dockerfile directory: {}", e))?;
+
+        // 创建Dockerfile内容
+        let dockerfile_content = r#"FROM ubuntu:22.04
+
+# 设置非交互模式和时区
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TZ=UTC
+
+# 更新软件包并安装Docker和其他必要工具
+RUN apt-get update && apt-get install -y \
+    docker.io \
+    ca-certificates \
+    curl \
+    wget \
+    net-tools \
+    htop \
+    iotop \
+    python3 \
+    python3-pip \
+    && pip3 install requests psutil docker \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# 复制nokube二进制和SSL库
+COPY target/nokube /usr/local/bin/nokube
+COPY target/lib*.so.1.1 /usr/local/lib/
+
+# 设置权限和环境变量
+RUN chmod +x /usr/local/bin/nokube
+ENV LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
+ENV PATH=/usr/local/bin:$PATH
+
+# 设置工作目录
+WORKDIR /root
+
+# 默认命令
+CMD ["sh"]
+"#;
+
+        let dockerfile_path = format!("{}/Dockerfile", dockerfile_dir);
+        std::fs::write(&dockerfile_path, dockerfile_content)
+            .map_err(|e| anyhow::anyhow!("Failed to write Dockerfile: {}", e))?;
+
+        // 构建Docker镜像
+        info!("Building nokube Docker image...");
+        let build_result = std::process::Command::new("sudo")
+            .args(&[
+                "docker", "build",
+                "-t", "nokube:latest",
+                "-f", &dockerfile_path,
+                "."
+            ])
+            .output()
+            .map_err(|e| anyhow::anyhow!("Failed to execute docker build: {}", e))?;
+
+        if !build_result.status.success() {
+            let error_msg = String::from_utf8_lossy(&build_result.stderr);
+            return Err(anyhow::anyhow!("Docker build failed: {}", error_msg));
         }
 
-        // Create dependency installation script
-        let install_script = r#"#!/bin/bash
-set -e
+        info!("Docker image built successfully");
 
-echo "Installing nokube dependencies..."
+        // 导出Docker镜像为tar包
+        info!("Exporting Docker image to tar file...");
+        let export_result = std::process::Command::new("sudo")
+            .args(&[
+                "docker", "save",
+                "-o", "./tmp/nokube-image.tar",
+                "nokube:latest"
+            ])
+            .output()
+            .map_err(|e| anyhow::anyhow!("Failed to execute docker save: {}", e))?;
 
-# Update package lists
-apt-get update
+        if !export_result.status.success() {
+            let error_msg = String::from_utf8_lossy(&export_result.stderr);
+            return Err(anyhow::anyhow!("Docker export failed: {}", error_msg));
+        }
 
-# Install Python dependencies
-pip3 install requests psutil docker
+        // 修复tar文件权限 - 获取当前用户
+        let current_user = std::env::var("USER").unwrap_or_else(|_| "pa".to_string());
+        let chown_result = std::process::Command::new("sudo")
+            .args(&["chown", &format!("{}:{}", current_user, current_user), "./tmp/nokube-image.tar"])
+            .output()
+            .map_err(|e| anyhow::anyhow!("Failed to execute chown: {}", e))?;
 
-# Install system dependencies
-apt-get install -y htop iotop net-tools
+        if !chown_result.status.success() {
+            let error_msg = String::from_utf8_lossy(&chown_result.stderr);
+            return Err(anyhow::anyhow!("Failed to change tar file ownership: {}", error_msg));
+        }
 
-echo "Dependencies installed successfully"
-"#;
-        let install_script_path = format!("{}/install_dependencies.py", local_staging_dir);
-        std::fs::write(
-            &install_script_path,
-            install_script,
-        ).map_err(|e| anyhow::anyhow!("Failed to write install script to {}: {}", install_script_path, e))?;
-
-        info!("Dependencies prepared");
+        info!("Docker image exported to ./tmp/nokube-image.tar");
         Ok(())
     }
 
@@ -185,12 +255,39 @@ echo "Dependencies installed successfully"
                 ssh_manager.execute_command(&create_storage_cmd, true, true).await
                     .map_err(|e| anyhow::anyhow!("Failed to create storage path {} on node {}: {}", storage_path, node.name, e))?;
                 
-                // 上传 remote_lib 目录（不包含 cluster config）
+                // 上传Docker镜像tar包
+                info!("Uploading Docker image to node: {}", node.name);
+                let remote_image_path = format!("{}/nokube-image.tar", workspace);
+                ssh_manager
+                    .upload_file("./tmp/nokube-image.tar", &remote_image_path)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to upload Docker image to node {}: {}", node.name, e))?;
+
+                // 加载Docker镜像
+                info!("Loading Docker image on node: {}", node.name);
+                let load_image_cmd = format!("sudo docker load -i {}", remote_image_path);
+                ssh_manager.execute_command(&load_image_cmd, true, true).await
+                    .map_err(|e| anyhow::anyhow!("Failed to load Docker image on node {}: {}", node.name, e))?;
+
+                // 验证镜像已加载
+                info!("Verifying Docker image on node: {}", node.name);
+                ssh_manager.execute_command("sudo docker images | grep nokube", true, true).await
+                    .map_err(|e| anyhow::anyhow!("Failed to verify Docker image on node {}: {}", node.name, e))?;
+
+                // 上传 remote_lib 目录（保留兼容性）
                 let local_staging_dir = "./tmp/nokube-remote-lib";
                 ssh_manager
                     .upload_directory(local_staging_dir, &remote_lib_path, true)
                     .await
                     .map_err(|e| anyhow::anyhow!("Failed to upload remote lib to node {}: {}", node.name, e))?;
+                
+                // 强制更新 nokube 二进制文件（确保使用最新版本）
+                let nokube_binary_path = format!("{}/nokube", remote_lib_path);
+                info!("Force updating nokube binary on node: {}", node.name);
+                ssh_manager
+                    .force_upload_file("target/nokube", &nokube_binary_path)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to force upload nokube binary to node {}: {}", node.name, e))?;
                 
                 // 验证上传的二进制文件
                 info!("Verifying uploaded binary on node: {}", node.name);
@@ -212,10 +309,27 @@ echo "Dependencies installed successfully"
                     .map_err(|e| anyhow::anyhow!("Failed to create config directory on node {}: {}", node.name, e))?;
                 
                 // 上传 nokube config 到全局配置路径（将被挂载到容器内）
-                ssh_manager
-                    .upload_file("/home/pa/.nokube/config.yaml", &remote_config_path)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("Failed to upload config file to {}: {}", remote_config_path, e))?;
+                // 使用 ConfigManager 统一的解析/生成逻辑
+                if let Some(local_cfg) = crate::config::ConfigManager::try_get_existing_local_config_path() {
+                    ssh_manager
+                        .upload_file(local_cfg.to_str().unwrap(), &remote_config_path)
+                        .await
+                        .map_err(|e| anyhow::anyhow!("Failed to upload config file to {}: {}", remote_config_path, e))?;
+                } else {
+                    // 本地不存在任何配置文件：根据当前 ConfigManager 生成最小配置
+                    let yaml = self.config_manager.generate_minimal_config_yaml();
+                    // 写入到临时文件再上传
+                    let tmp_dir = "./tmp";
+                    std::fs::create_dir_all(tmp_dir)
+                        .map_err(|e| anyhow::anyhow!("Failed to create tmp dir {}: {}", tmp_dir, e))?;
+                    let tmp_cfg_path = format!("{}/generated_nokube_config.yaml", tmp_dir);
+                    std::fs::write(&tmp_cfg_path, yaml)
+                        .map_err(|e| anyhow::anyhow!("Failed to write temp config {}: {}", tmp_cfg_path, e))?;
+                    ssh_manager
+                        .upload_file(&tmp_cfg_path, &remote_config_path)
+                        .await
+                        .map_err(|e| anyhow::anyhow!("Failed to upload generated config to {}: {}", remote_config_path, e))?;
+                }
 
                 // 构造参数对象并 base64 编码
                 let mut extra_params = json!({

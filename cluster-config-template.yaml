@@ -9,8 +9,14 @@ task_spec:
   monitoring:
     grafana:
       port: 3000
+      # 可选：admin 登录凭据（不配置默认 admin/admin）
+      # admin_user: admin
+      # admin_password: admin
     greptimedb:
       port: 4000
+      # 可选：用于 Grafana 通过 MySQL 协议查询日志的凭据（不配置默认 root/空密码）
+      # mysql_user: root
+      # mysql_password: ""
     enabled: true
 
 # 节点列表
