@@ -182,4 +182,21 @@ impl ClusterConfig {
     pub fn add_service(&mut self, _service: ServiceConfig) {
         // services will be handled separately as they're not part of the cluster config
     }
+
+    /// 获取 Head 节点的 IP（严格要求存在，失败向上返回错误）
+    pub fn head_node_ip(&self) -> anyhow::Result<String> {
+        let head = self
+            .nodes
+            .iter()
+            .find(|n| matches!(n.role, NodeRole::Head))
+            .ok_or_else(|| anyhow::anyhow!("Head node not found in cluster '{}'", self.cluster_name))?;
+        Ok(head.get_ip()?.to_string())
+    }
+
+    /// 生成 OTLP 日志完整 Endpoint（约定优于配置）
+    pub fn otlp_logs_endpoint(&self) -> anyhow::Result<String> {
+        let ip = self.head_node_ip()?;
+        let port = self.task_spec.monitoring.greptimedb.port;
+        Ok(format!("http://{}:{}/v1/otlp/v1/logs", ip, port))
+    }
 }

@@ -13,8 +13,8 @@ task_spec:
       admin_password: admin
     greptimedb:
       port: 4000
-      mysql_user: admin
-      mysql_password: "admin"
+      mysql_user: root
+      mysql_password: ""
     enabled: true
 
 # 节点列表

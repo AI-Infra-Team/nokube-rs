@@ -3,10 +3,8 @@ pub mod remote_executor;
 pub mod process_manager;
 pub mod docker_runner;
 pub mod log_collector;
-pub mod endpoints;
 
 pub use exporter::Exporter;
 pub use remote_executor::RemoteExecutor;
 pub use docker_runner::{DockerRunner, DockerRunConfig};
 pub use log_collector::{LogCollector, LogCollectorConfig};
-pub use endpoints::*;

@@ -81,20 +81,26 @@ impl ServiceModeAgent {
 
     async fn initialize_log_collector(&mut self) -> anyhow::Result<()> {
         // 获取 GreptimeDB URL（从head节点配置中）
-        // 解析 OTLP Logs 端点（支持环境变量覆盖）
-        let otlp_logs_endpoint = crate::agent::general::endpoints::otlp_logs_endpoint(&self.config);
+        // 解析 OTLP Logs 端点（严格要求 head 节点存在）
+        let otlp_logs_endpoint = self.config.otlp_logs_endpoint()?;
         
+        tracing::info!(
+            "Init LogCollector: endpoint={}, auth_user={}, auth_password_set={}",
+            otlp_logs_endpoint,
+            self.config.task_spec.monitoring.greptimedb.mysql_user.as_deref().unwrap_or("<none>"),
+            self.config.task_spec.monitoring.greptimedb.mysql_password.as_deref().map(|s| !s.is_empty()).unwrap_or(false)
+        );
+
         let config = LogCollectorConfig {
             cluster_name: self.cluster_name.clone(),
             node_name: self.node_id.clone(),
             otlp_logs_endpoint,
             batch_size: 10,
             flush_interval_secs: 5,
-            // 超时可通过环境变量 NOKUBE_LOG_FLUSH_TIMEOUT_SECS 配置，默认5秒
-            flush_timeout_secs: std::env::var("NOKUBE_LOG_FLUSH_TIMEOUT_SECS")
-                .ok()
-                .and_then(|v| v.parse::<u64>().ok())
-                .unwrap_or(5),
+            // 约定优于配置：固定超时 5 秒
+            flush_timeout_secs: 5,
+            auth_user: self.config.task_spec.monitoring.greptimedb.mysql_user.clone(),
+            auth_password: self.config.task_spec.monitoring.greptimedb.mysql_password.clone(),
         };
         
         let mut log_collector = LogCollector::new(config)?;
@@ -229,11 +235,10 @@ impl ServiceModeAgent {
                 } else { "127.0.0.1" };
                 let greptime_port = self.config.task_spec.monitoring.greptimedb.port;
                 let mysql_port = greptime_port + 2;
+                // 约定优于配置：仅使用集群配置中的凭证，或默认 root/无口令
                 let mysql_user = self.config.task_spec.monitoring.greptimedb.mysql_user.clone()
-                    .or_else(|| std::env::var("NOKUBE_GREPTIME_MYSQL_USER").ok())
                     .unwrap_or_else(|| "root".to_string());
-                let mysql_pass = self.config.task_spec.monitoring.greptimedb.mysql_password.clone()
-                    .or_else(|| std::env::var("NOKUBE_GREPTIME_MYSQL_PASSWORD").ok());
+                let mysql_pass = self.config.task_spec.monitoring.greptimedb.mysql_password.clone();
                 let secure_block = match mysql_pass { Some(ref p) if !p.is_empty() => format!("\n  secureJsonData:\n    password: {}\n", p), _ => String::new() };
                 let ds_yaml = format!(r#"apiVersion: 1
 datasources:
