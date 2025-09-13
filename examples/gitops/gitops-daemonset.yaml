@@ -1,21 +1,36 @@
 apiVersion: v1
-kind: Secret
+kind: ConfigMap
 metadata:
   name: gitops-config
-  namespace: nokube-system
-type: Opaque
+  namespace: gitops-system
 data:
-  # GitHub Personal Access Token (base64 encoded)
-  github-token: Z2hwX1RoaXNJc0FEZW1vVG9rZW5SZXBsYWNlV2l0aFlvdXJzCg==
-  # GitOps配置文件 (base64 encoded JSON)
-  gitops-config.json: ewogICJyZXBvX293bmVyIjogIm15LW9yZyIsCiAgInJlcG9fbmFtZSI6ICJnaXRvcHMtY29uZmlnIiwKICAiYnJhbmNoIjogIm1haW4iLAogICJ0YXJnZXRfZmlsZXMiOiBbCiAgICAiZGVwbG95bWVudHMvYXBwLnlhbWwiLAogICAgImNvbmZpZ3MvYXBwLWNvbmZpZy5qc29uIiwKICAgICJzZXJ2aWNlcy9kYXRhYmFzZS55YW1sIgogIF0sCiAgInBvbGxfaW50ZXJ2YWwiOiA2MCwKICAid2ViaG9va191cmwiOiAiaHR0cHM6Ly9hcGkubXlvcmcuY29tL3dlYmhvb2tzL2dpdG9wcyIKfQo=
+  gitops-config.yaml: |
+    # GitOps 配置（挂载至 /etc/gitops/gitops-config.yaml）
+    github_configs:
+      core-repo:
+        repo_owner: "your-org"
+        repo_name: "gitops-config"
+        branch: "main"
+        token: "ghp_your_token_here"
+
+    services:
+      - name: example
+        github: core-repo
+        k8s_yaml_dir: k8s
+
+    # 可选：本地 Applyer（通过 nokube CLI 应用）
+    applyer_nokube:
+      cluster_name: "home-cluster"
+      nokube_download_url: "https://releases.example.com/nokube/linux-amd64/nokube"
+
+    poll_interval: 60
 
 ---
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: gitops-scripts
-  namespace: nokube-system
+  namespace: gitops-system
 data:
   requirements.txt: |
     requests==2.31.0
@@ -56,7 +71,7 @@ spec:
       
       # 容忍管理节点的污点
       tolerations:
-      - key: "node-role.nokube.io/management"
+      - key: "node-role.gitops.io/management"
         operator: "Equal"
         value: "true"
         effect: "NoSchedule"
@@ -77,6 +92,8 @@ spec:
           value: "1"
         - name: TZ
           value: "UTC"
+        - name: GITOPS_CONFIG
+          value: "/etc/gitops/gitops-config.yaml"
         
         # 资源限制
         resources:
@@ -94,9 +111,9 @@ spec:
           mountPath: /scripts
           readOnly: true
         
-        # GitOps配置和token
+        # GitOps 配置（ConfigMap 挂载）
         - name: gitops-config
-          mountPath: /pod-workspace/secret
+          mountPath: /etc/gitops
           readOnly: true
         
         # 工作空间（持久化状态和部署文件）
@@ -142,14 +159,14 @@ spec:
       
       # GitOps配置和密钥
       - name: gitops-config
-        secret:
-          secretName: gitops-config
-          defaultMode: 0600
+        configMap:
+          name: gitops-config
+          defaultMode: 0444
       
       # 工作空间（使用主机路径持久化）
       - name: workspace
         hostPath:
-          path: /opt/nokube/gitops-workspace
+          path: /opt/gitops-workspace
           type: DirectoryOrCreate
       
       # 重启策略
@@ -163,7 +180,7 @@ apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: gitops-controller
-  namespace: nokube-system
+  namespace: gitops-system
 
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -196,21 +213,4 @@ roleRef:
 subjects:
 - kind: ServiceAccount
   name: gitops-controller
-  namespace: nokube-system
-
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: gitops-controller
-  namespace: nokube-system
-  labels:
-    app: gitops-controller
-spec:
-  type: ClusterIP
-  ports:
-  - port: 8080
-    targetPort: 8080
-    name: http
-  selector:
-    app: gitops-controller
+  namespace: gitops-system

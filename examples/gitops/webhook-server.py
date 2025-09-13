@@ -9,6 +9,11 @@ import json
 import logging
 from datetime import datetime
 from flask import Flask, request, jsonify
+from typing import Dict, Any, List, Optional, Tuple
+try:
+    import yaml  # type: ignore
+except Exception:  # pragma: no cover - optional dependency in example
+    yaml = None
 from typing import Dict, Any
 
 # 配置日志
@@ -114,6 +119,60 @@ class WebhookHandler:
 # 创建全局webhook处理器
 workspace_path = os.getenv('NOKUBE_WORKSPACE', '/workspace')
 webhook_handler = WebhookHandler(workspace_path)
+
+
+def _load_gitops_config(config_path: Optional[str] = None) -> Dict[str, Any]:
+    """Load GitOps config from YAML if present; otherwise return empty skeleton.
+
+    Looks for env `GITOPS_CONFIG` (defaults to /etc/gitops/gitops-config.yaml).
+    """
+    path = config_path or os.getenv('GITOPS_CONFIG', '/etc/gitops/gitops-config.yaml')
+    data: Dict[str, Any] = {"github_configs": [], "services": []}
+    try:
+        if path and os.path.exists(path) and yaml is not None:
+            with open(path, 'r', encoding='utf-8') as f:
+                loaded = yaml.safe_load(f) or {}
+            data['github_configs'] = loaded.get('github_configs', []) or []
+            data['services'] = loaded.get('services', []) or []
+    except Exception as e:  # non-fatal: best-effort
+        logger.warning(f"Failed to load GitOps config from {path}: {e}")
+    return data
+
+
+def _parse_repo_fullname(repo_url: str) -> Optional[Tuple[str, str]]:
+    """Parse https GitHub URL to (owner, repo)"""
+    try:
+        if repo_url.startswith('https://github.com/'):
+            tail = repo_url.replace('https://github.com/', '').strip('/')
+            parts = tail.split('/')
+            if len(parts) >= 2:
+                return parts[0], parts[1]
+    except Exception:
+        pass
+    return None
+
+
+def _load_recent_deployments(limit: int = 1000) -> List[Dict[str, Any]]:
+    tasks: List[Dict[str, Any]] = []
+    tasks_file = os.path.join(workspace_path, 'deployment-tasks.jsonl')
+    if not os.path.exists(tasks_file):
+        return tasks
+    try:
+        with open(tasks_file, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    tasks.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+        # keep only the last N
+        if len(tasks) > limit:
+            tasks = tasks[-limit:]
+    except Exception as e:
+        logger.warning(f"Failed to read deployment tasks: {e}")
+    return tasks
 
 @app.route('/health', methods=['GET'])
 def health_check():
@@ -237,6 +296,111 @@ def get_status():
         
     except Exception as e:
         logger.error(f"Status check failed: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/v1/gitops/repos', methods=['GET'])
+def list_gitops_repos():
+    """List repos watched by GitOps and their latest deployment status.
+
+    Aggregates from config (github_configs + services) and recent deployment tasks.
+    """
+    try:
+        cfg = _load_gitops_config()
+        services = cfg.get('services', [])
+        gh_cfgs_raw = cfg.get('github_configs', {})
+
+        # Normalize github_configs to a key -> {owner, name, branch}
+        gh_by_key: Dict[str, Dict[str, Any]] = {}
+        if isinstance(gh_cfgs_raw, dict):
+            for k, gh in gh_cfgs_raw.items():
+                gh_by_key[k] = {
+                    'owner': gh.get('repo_owner'),
+                    'name': gh.get('repo_name'),
+                    'branch': gh.get('branch', 'main'),
+                }
+        elif isinstance(gh_cfgs_raw, list):
+            for gh in gh_cfgs_raw:
+                k = gh.get('key') or f"{gh.get('repo_owner')}/{gh.get('repo_name')}"
+                gh_by_key[k] = {
+                    'owner': gh.get('repo_owner'),
+                    'name': gh.get('repo_name'),
+                    'branch': gh.get('branch', 'main'),
+                }
+
+        # Build mapping: repo(full_name) -> branch (from github_configs) and services
+        repo_branch: Dict[str, str] = {}
+        for g in gh_by_key.values():
+            owner, name = g.get('owner'), g.get('name')
+            if owner and name:
+                repo_branch[f"{owner}/{name}"] = g.get('branch', 'main')
+
+        repo_services: Dict[str, List[str]] = {}
+        repo_urls: Dict[str, str] = {}
+        for svc in services:
+            name = svc.get('name', '')
+            full: Optional[str] = None
+            if 'github' in svc and svc['github'] in gh_by_key:
+                g = gh_by_key[svc['github']]
+                if g.get('owner') and g.get('name'):
+                    full = f"{g['owner']}/{g['name']}"
+            elif 'repo' in svc:
+                parsed = _parse_repo_fullname(svc.get('repo', ''))
+                if parsed:
+                    full = f"{parsed[0]}/{parsed[1]}"
+            if not full:
+                continue
+            repo_services.setdefault(full, []).append(name)
+            repo_urls[full] = f"https://github.com/{full}"
+
+        # Load recent deployment tasks and compute latest per repo
+        tasks = _load_recent_deployments()
+        latest: Dict[str, Dict[str, Any]] = {}
+        for t in tasks:
+            full = t.get('repository') or ''
+            if not full:
+                continue
+            ts = t.get('timestamp')
+            if isinstance(ts, str):
+                # try parse ISO back to epoch
+                try:
+                    ts_val = datetime.fromisoformat(ts.replace('Z', '+00:00')).timestamp()
+                except Exception:
+                    ts_val = None
+            else:
+                ts_val = ts
+            if ts_val is None:
+                continue
+            prev = latest.get(full)
+            if not prev or ts_val >= prev.get('ts', 0):
+                latest[full] = {
+                    'ts': ts_val,
+                    'iso': datetime.utcfromtimestamp(ts_val).isoformat() + 'Z',
+                    'sha': t.get('sha') or t.get('new_sha')
+                }
+
+        # Build response list
+        result: List[Dict[str, Any]] = []
+        all_repos = set(repo_services.keys()) | set(latest.keys()) | set(repo_branch.keys())
+        for full in sorted(all_repos):
+            url = repo_urls.get(full, f"https://github.com/{full}")
+            branch = repo_branch.get(full, 'main')
+            last = latest.get(full, {})
+            entry = {
+                'repo': full,
+                'url': url,
+                'branch': branch,
+                'last_deploy_time': last.get('iso'),
+                'last_commit_id': last.get('sha'),
+                'services': sorted(repo_services.get(full, [])),
+                'service_count': len(repo_services.get(full, [])),
+            }
+            result.append(entry)
+
+        return jsonify({'repos': result, 'count': len(result), 'timestamp': datetime.utcnow().isoformat() + 'Z'})
+
+    except Exception as e:
+        logger.error(f"Failed to list gitops repos: {e}")
         return jsonify({'error': str(e)}), 500
 
 def main():

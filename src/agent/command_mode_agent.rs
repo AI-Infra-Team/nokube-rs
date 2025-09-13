@@ -894,9 +894,60 @@ providers:
         std::io::Write::flush(&mut std::io::stdout()).ok();
         self.import_logs_dashboard_mysql(grafana_port, node_ip).await?;
         
+        // 设置集群仪表盘为首页
+        if let Err(e) = self.set_home_dashboard(grafana_port, node_ip, "nokube-cluster-monitoring").await {
+            println!("[REALTIME] ⚠️ Failed to set home dashboard: {}", e);
+            info!("Failed to set home dashboard: {}", e);
+        } else {
+            println!("[REALTIME] 🏠 Set cluster dashboard as home");
+        }
+
         println!("[REALTIME] 🎉 All Grafana setup completed successfully!");
         std::io::Write::flush(&mut std::io::stdout()).ok();
         
+        Ok(())
+    }
+
+    async fn set_home_dashboard(&self, grafana_port: u16, node_ip: &str, uid: &str) -> Result<()> {
+        let client = reqwest::Client::new();
+        let prefs_url = format!("http://{}:{}/api/org/preferences", node_ip, grafana_port);
+        let grafana_user = self.config.task_spec.monitoring.grafana.admin_user.clone().unwrap_or_else(|| "admin".to_string());
+        let grafana_pass = self.config.task_spec.monitoring.grafana.admin_password.clone().unwrap_or_else(|| "admin".to_string());
+        let body = serde_json::json!({
+            "homeDashboardUID": uid
+        });
+        let resp = client
+            .put(&prefs_url)
+            .header("Content-Type", "application/json")
+            .basic_auth(&grafana_user, Some(&grafana_pass))
+            .json(&body)
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            anyhow::bail!("Failed to set home dashboard: {} - {}", status, text);
+        }
+
+        // Star the dashboard for visibility
+        let get_url = format!("http://{}:{}/api/dashboards/uid/{}", node_ip, grafana_port, uid);
+        let dash = client
+            .get(&get_url)
+            .basic_auth(&grafana_user, Some(&grafana_pass))
+            .send()
+            .await?;
+        if dash.status().is_success() {
+            if let Ok(val) = dash.json::<serde_json::Value>().await {
+                if let Some(id) = val.get("dashboard").and_then(|d| d.get("id")).and_then(|v| v.as_i64()) {
+                    let star_url = format!("http://{}:{}/api/user/stars/dashboard/{}", node_ip, grafana_port, id);
+                    let _ = client
+                        .post(&star_url)
+                        .basic_auth(&grafana_user, Some(&grafana_pass))
+                        .send()
+                        .await;
+                }
+            }
+        }
         Ok(())
     }
 
@@ -904,6 +955,17 @@ providers:
         println!("[REALTIME] 📋 Importing NoKube cluster monitoring dashboard");
         info!("Importing NoKube cluster monitoring dashboard");
         
+        let http_port = self.config.task_spec.monitoring.httpserver.port;
+        let greptimedb_port = self.config.task_spec.monitoring.greptimedb.port;
+        let greptime_endpoint = format!("http://{}:{}", node_ip, greptimedb_port);
+
+        let links_markdown = format!(
+            "### 关键服务\n\n- [Actor Dashboard](/d/nokube-actor-dashboard)\n- [Logs (MySQL)](/d/nokube-logs-mysql)\n- [HTTP 文件服务器](http://{node}:{http_port})\n- [Greptime Metrics]({greptime}/v1/prometheus)\n",
+            node = node_ip,
+            http_port = http_port,
+            greptime = greptime_endpoint,
+        );
+
         let dashboard_config = serde_json::json!({
             "dashboard": {
                 "id": null,
@@ -911,6 +973,12 @@ providers:
                 "title": "NoKube Cluster Monitoring",
                 "tags": ["nokube", "cluster"],
                 "timezone": "browser",
+                "links": [
+                    {"type": "link", "title": "Actor Dashboard", "url": "/d/nokube-actor-dashboard", "targetBlank": true},
+                    {"type": "link", "title": "Logs (MySQL)", "url": "/d/nokube-logs-mysql", "targetBlank": true},
+                    {"type": "link", "title": "HTTP 文件服务器", "url": format!("http://{}:{}", node_ip, http_port), "targetBlank": true},
+                    {"type": "link", "title": "Greptime Metrics", "url": format!("{}/v1/prometheus", greptime_endpoint), "targetBlank": true}
+                ],
                 "refresh": "30s",
                 "time": {
                     "from": "now-1h",
@@ -950,11 +1018,18 @@ providers:
                         "collapsed": false
                     },
                     {
+                        "id": 10,
+                        "title": "关键链接",
+                        "type": "text",
+                        "gridPos": {"h": 8, "w": 8, "x": 0, "y": 1},
+                        "options": {"mode": "markdown", "content": links_markdown}
+                    },
+                    {
                         "id": 2,
                         "title": "Cluster CPU Usage Overview",
                         "type": "timeseries",
                         "datasource": "GreptimeDB",
-                        "gridPos": {"h": 8, "w": 24, "x": 0, "y": 1},
+                        "gridPos": {"h": 8, "w": 16, "x": 8, "y": 1},
                         "targets": [
                             {
                                 "expr": "nokube_cpu_usage",
@@ -982,7 +1057,7 @@ providers:
                         "title": "Cluster Memory Usage (%)",
                         "type": "timeseries",
                         "datasource": "GreptimeDB",
-                        "gridPos": {"h": 8, "w": 8, "x": 0, "y": 1},
+                        "gridPos": {"h": 8, "w": 8, "x": 0, "y": 9},
                         "targets": [
                             {"expr": "nokube_memory_usage", "legendFormat": "{{instance}}", "interval": "30s"}
                         ],
@@ -1005,7 +1080,7 @@ providers:
                         "title": "Cluster Container Memory (bytes, stacked)",
                         "type": "timeseries",
                         "datasource": "GreptimeDB",
-                        "gridPos": {"h": 8, "w": 8, "x": 8, "y": 1},
+                        "gridPos": {"h": 8, "w": 8, "x": 8, "y": 9},
                         "targets": [
                             {"expr": "sum by (container) (nokube_container_mem_bytes)", "legendFormat": "{{container}}", "interval": "30s"},
                             {"expr": "sum(nokube_memory_used_bytes)", "legendFormat": "Cluster Used", "interval": "30s"},
@@ -1034,7 +1109,7 @@ providers:
                         "title": "Cluster Container CPU (%) (stacked)",
                         "type": "timeseries",
                         "datasource": "GreptimeDB",
-                        "gridPos": {"h": 8, "w": 8, "x": 16, "y": 1},
+                        "gridPos": {"h": 8, "w": 8, "x": 16, "y": 9},
                         "targets": [
                             {"expr": "sum by (container) (nokube_container_cpu)", "legendFormat": "{{container}}", "interval": "30s"}
                         ],

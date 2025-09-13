@@ -31,7 +31,8 @@ pub struct NodeConfig {
     pub ssh_url: String,
     pub name: String,
     pub role: NodeRole,
-    pub storage: StorageConfig,
+    // Optional: explicit storage path; if omitted, use workspace as storage root
+    pub storage: Option<StorageConfig>,
     pub users: Vec<UserConfig>,
     pub proxy: Option<ProxyConfig>,
     pub workspace: Option<String>,
@@ -87,6 +88,7 @@ pub struct MonitoringConfig {
     pub grafana: GrafanaConfig,
     pub greptimedb: GreptimeDbConfig,
     pub enabled: bool,
+    pub httpserver: HttpServerConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -102,6 +104,14 @@ pub struct GreptimeDbConfig {
     pub mysql_user: Option<String>,
     pub mysql_password: Option<String>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HttpServerConfig {
+    pub port: u16,
+}
+
+/// 固定的 HTTP 文件服务挂载子路径（相对节点 workspace）
+pub const HTTP_SERVER_MOUNT_SUBPATH: &str = "public_file_server";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NokubeSpecificConfig {
@@ -136,20 +146,30 @@ impl NodeConfig {
             .ok_or_else(|| anyhow::anyhow!("Missing required workspace configuration for node: {}", self.name))
     }
 
-    /// 获取节点的存储路径，会使用 workspace 作为前缀
+    /// 获取节点的存储路径：
+    /// - 如果配置了 storage.path，则将其视为相对于 workspace 的路径（或绝对路径）
+    /// - 如果未配置 storage，则直接返回 workspace 作为存储根目录
     pub fn get_storage_path(&self) -> Result<String, anyhow::Error> {
         let workspace = self.get_workspace()?;
-        if self.storage.path.starts_with('/') {
-            // 如果 storage.path 是绝对路径，检查是否已经在 workspace 下
-            if self.storage.path.starts_with(workspace) {
-                Ok(self.storage.path.clone())
-            } else {
-                // 否则将其作为相对路径添加到 workspace 下
-                Ok(format!("{}{}", workspace, self.storage.path))
+        match &self.storage {
+            Some(storage) => {
+                if storage.path.starts_with('/') {
+                    // 如果 storage.path 是绝对路径，检查是否已经在 workspace 下
+                    if storage.path.starts_with(workspace) {
+                        Ok(storage.path.clone())
+                    } else {
+                        // 否则将其作为相对路径添加到 workspace 下
+                        Ok(format!("{}{}", workspace, storage.path))
+                    }
+                } else {
+                    // 如果是相对路径，直接添加到 workspace 下
+                    Ok(format!("{}/{}", workspace, storage.path))
+                }
             }
-        } else {
-            // 如果是相对路径，直接添加到 workspace 下
-            Ok(format!("{}/{}", workspace, self.storage.path))
+            None => {
+                // 未配置 storage，使用 workspace 作为存储根目录
+                Ok(workspace.to_string())
+            }
         }
     }
 }
@@ -164,6 +184,7 @@ impl ClusterConfig {
                     grafana: GrafanaConfig { port: 3000, admin_user: None, admin_password: None },
                     greptimedb: GreptimeDbConfig { port: 4000, mysql_user: None, mysql_password: None },
                     enabled: true,
+                    httpserver: HttpServerConfig { port: 8088 },
                 },
             },
             nodes: Vec::new(),

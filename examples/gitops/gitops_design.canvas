@@ -1,0 +1,38 @@
+{
+	"nodes":[
+		{"id":"group-gitops","type":"group","x":-200,"y":-620,"width":2560,"height":2020,"label":"Kubernetes‑Compatible Simple GitOps"},
+		{"id":"70ce80035cbf2387","type":"group","x":60,"y":508,"width":997,"height":410,"label":"main scripts"},
+		{"id":"0d7fc931943e2238","type":"group","x":720,"y":-11,"width":397,"height":401,"label":"gitops 核心流程"},
+		{"id":"n-script-controller","type":"text","text":"gitops-controller.py\nmount: /workspace/scripts/gitops-controller.py","x":620,"y":676,"width":417,"height":95},
+		{"id":"n-controller","type":"text","text":"## GitOps Controller (DaemonSet)\n- Image: python:3.10-slim\n- Polls repo on schedule\n- Detects changes & renders manifests\n- Emits standard Kubernetes YAML","x":620,"y":-380,"width":440,"height":240},
+		{"id":"0b37f7e73db2a197","type":"text","text":"- 轮询: Git 变更检测 → 获取文件 → 处理/无状态化","x":742,"y":156,"width":355,"height":76},
+		{"id":"n-config-details","type":"text","text":"/etc/gitops/gitops-config.yaml (Env: GITOPS_CONFIG)\n\nSchema (YAML)\n- github_configs (map)\n  key: { repo_owner, repo_name, branch=main, token? }\n- services (list)\n  - name, github: <key>, k8s_yaml_dir\n  - 兼容: repo (https URL) 旧写法\n- poll_interval (seconds)\n- applyer_nokube: { cluster_name, nokube_download_url }","x":620,"y":960,"width":640,"height":420},
+		{"id":"n-config","type":"text","text":"## Config (ConfigMap)\n- Provides GitOps configuration (overview)\n- Mounted into container (details in sub-block)\n- Referenced via env (details in sub-block)","x":-120,"y":1160,"width":520,"height":220},
+		{"id":"d31bf05f1e62b968","type":"text","text":"# 核心准则\n尽量实现简单，使用方便","x":80,"y":-311,"width":239,"height":103},
+		{"id":"n-http","type":"text","text":"## Artifact / HTTP Server\n- scripts/  (bootstrap)\n- apps/     (artifacts)\n- configs/  (templates)\n- releases/ (打包分发)\n  - nokube/\n    - bin/nokube\n    - lib/libcrypto.so.1.1, lib/libssl.so.1.1 (可选)\n    - nokube-image.tar (可选: 预构建镜像)\n    - manifest.json, install.sh\n- 详细组成与 new-or-update: 见 Nokube Canvas","x":-120,"y":-60,"width":620,"height":430},
+		{"id":"n-script-webhook","type":"text","text":"webhook-server.py\nmount: /workspace/scripts/webhook-server.py","x":620,"y":803,"width":417,"height":95},
+		{"id":"n-k8s-yaml","type":"text","text":"## K8s 部署清单（GitOps）\n\n[DaemonSet] gitops-controller\n- command: /bin/bash\n- args: /scripts/entrypoint.sh 或 \n        /workspace/config/install-deps.sh && python /workspace/scripts/gitops-controller.py\n- mounts:\n  - /scripts          ⇐ ConfigMap gitops-scripts (ro)\n  - /etc/gitops       ⇐ ConfigMap gitops-config (ro)\n  - /pod-workspace    ⇐ hostPath /opt/gitops-workspace\n- ports: 无\n\n[Deployment] gitops-webhook-server\n- command: /bin/bash -c \"pip install flask requests && python /workspace/scripts/webhook-server.py\"\n- env: FLASK_HOST=0.0.0.0, FLASK_PORT=8080\n- ports: 8080/TCP (containerPort，可选 Service 暴露)\n- mounts:\n  - /workspace/scripts ⇐ hostPath(或ConfigMap)\n  - /workspace/config  ⇐ ConfigMap webhook-config (ro)","x":1540,"y":-590,"width":740,"height":580},
+		{"id":"n-applyer-iface","type":"text","text":"## Applyer 抽象接口\n- 位置: examples/gitops/applyer_nokube.py (类: NokubeApplyer)\n\n\n- 方法: install() -> (bool ok, str msg)  — Controller 初始化时调用一次, 准备依赖并自检\n- 方法: apply(yaml: str) -> (bool ok, str out)  — 每次变更时调用, 返回执行输出/错误\n\n\n- 接入: examples/gitops/gitops-controller.py 里 __init__() 构建并 install(); apply_nokube_manifest() 调用 apply()\n- 可替换实现: 仅需实现同名方法即可 (如 KubectlApplyer: 调用 kubectl apply -f -, ArgoApplyer: 通过 Argo API 同步 Application)\n- 回退: 暂不提供 HTTP 回退; 失败仅记录日志/通知, 由上层处理","x":1280,"y":50,"width":680,"height":320},
+		{"id":"a42aaef2600bcf61","type":"text","text":" 启动: 读取配置 → 构建 Applyer → install()","x":740,"y":9,"width":357,"height":63},
+		{"id":"2913fc3a42d83f11","type":"text","text":"应用: apply(yaml)；失败记录并通知","x":742,"y":294,"width":355,"height":76},
+		{"id":"n-applyer-nokube","type":"text","text":"## Nokube Applyer\n文件: examples/gitops/applyer_nokube.py\n- 通过 `nokube apply --cluster <name>` 应用 YAML\n- 安装: 从 nokube_download_url 下载二进制到 /pod-workspace/bin/nokube（固定绝对路径）\n- 配置: applyer_nokube.{cluster_name, nokube_download_url}","x":1800,"y":485,"width":540,"height":275},
+		{"id":"n-script-applyer","type":"text","text":"applyer_nokube.py\nmount: /workspace/scripts/applyer_nokube.py","x":620,"y":532,"width":417,"height":95},
+		{"id":"n-script-apply","type":"text","text":"apply-gitops.py\n（用户侧 CLI 工具；不挂载到容器）","x":80,"y":528,"width":417,"height":95}
+	],
+	"edges":[
+		{"id":"edge-cfg-details","fromNode":"n-config","fromSide":"right","toNode":"n-config-details","toSide":"left","label":"config details"},
+		{"id":"edge-details-applyer","fromNode":"n-config","fromSide":"right","toNode":"n-script-applyer","toSide":"left","label":"mount /workspace/scripts"},
+		{"id":"edge-details-webhook","fromNode":"n-config","fromSide":"right","toNode":"n-script-webhook","toSide":"left","label":"mount /workspace/scripts"},
+		{"id":"edge-details-controller","fromNode":"n-config","fromSide":"right","toNode":"n-script-controller","toSide":"left","label":"mount /workspace/scripts"},
+		{"id":"edge-k8s-http","fromNode":"n-http","fromSide":"right","toNode":"n-k8s-yaml","toSide":"left","label":"k8s YAML"},
+		{"id":"edge-k8s-controller","fromNode":"n-controller","fromSide":"right","toNode":"n-k8s-yaml","toSide":"left","label":"k8s YAML"},
+		{"id":"edge-applyer-impl","fromNode":"n-applyer-iface","fromSide":"right","toNode":"n-applyer-nokube","toSide":"left","label":"implementation"},
+		{"id":"6bef3632bf19751e","fromNode":"2913fc3a42d83f11","fromSide":"right","toNode":"0b37f7e73db2a197","toSide":"right"},
+		{"id":"fc0012e78041d00e","fromNode":"a42aaef2600bcf61","fromSide":"bottom","toNode":"0b37f7e73db2a197","toSide":"top"},
+		{"id":"66563af8a2b471ec","fromNode":"0b37f7e73db2a197","fromSide":"bottom","toNode":"2913fc3a42d83f11","toSide":"top"},
+		{"id":"2862c52a55ae5e0a","fromNode":"n-controller","fromSide":"bottom","toNode":"a42aaef2600bcf61","toSide":"top"},
+		{"id":"de253f4ce47e0391","fromNode":"a42aaef2600bcf61","fromSide":"right","toNode":"n-applyer-iface","toSide":"left","color":"6"},
+		{"id":"f2f9f8e0dd8bcba7","fromNode":"2913fc3a42d83f11","fromSide":"right","toNode":"n-applyer-iface","toSide":"left","color":"6"},
+		{"id":"b9cbfbb7bd062d25","fromNode":"n-controller","fromSide":"left","toNode":"n-http","toSide":"right"}
+	]
+}

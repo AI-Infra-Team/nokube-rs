@@ -76,6 +76,15 @@ enum Commands {
         #[arg(long)]
         extra_params: Option<String>,
     },
+    /// Delete a resource from the cluster store (etcd)
+    Delete {
+        /// Resource type (pod, deployment, daemonset, configmap, secret)
+        resource_type: String,
+        /// Resource name
+        name: String,
+        #[arg(short, long)]
+        cluster: Option<String>,
+    },
 }
 use clap::{Parser, Subcommand};
 use tracing::{error, info};
@@ -122,6 +131,7 @@ async fn main() -> Result<()> {
         },
         Commands::AgentCommand { extra_params } => handle_agent_command(extra_params).await,
         Commands::AgentService { extra_params } => handle_agent_service(extra_params).await,
+        Commands::Delete { resource_type, name, cluster } => handle_delete(resource_type, name, cluster).await,
     };
 
     if let Err(e) = &result {
@@ -154,6 +164,26 @@ async fn handle_new_or_update(config_file: Option<String>) -> Result<()> {
         }
     };
     let cluster_name = cluster_config.cluster_name.clone();
+    // Validate HTTP server config presence and print helpful paths
+    let http_port = cluster_config.task_spec.monitoring.httpserver.port;
+    // Resolve head node workspace and IP
+    let head_node = cluster_config
+        .nodes
+        .iter()
+        .find(|n| matches!(n.role, crate::config::cluster_config::NodeRole::Head));
+    if head_node.is_none() {
+        error!("Head node is required for HTTP server distribution");
+        return Err(NokubeError::Config("Missing head node in cluster config".to_string()));
+    }
+    let head = head_node.unwrap();
+    let head_ip = head.get_ip().unwrap_or("127.0.0.1").to_string();
+    let head_ws = head.workspace.clone().unwrap_or("/opt/nokube".to_string());
+    let artifacts_host_dir = format!("{}/{}", head_ws, crate::config::cluster_config::HTTP_SERVER_MOUNT_SUBPATH);
+    let releases_dir = format!("{}/releases/nokube", artifacts_host_dir);
+    let http_base = format!("http://{}:{}/releases/nokube", head_ip, http_port);
+    info!("HTTP Server configured: port={} (head={})", http_port, head_ip);
+    info!("Place artifacts on head at: {}", releases_dir);
+    info!("Nodes will download from: {}", http_base);
     match DeploymentController::new().await {
         Ok(mut deployment_controller) => {
             let config_manager_result = ConfigManager::new().await;
@@ -230,6 +260,33 @@ async fn handle_new_or_update(config_file: Option<String>) -> Result<()> {
             Err(NokubeError::Deployment(format!("Controller creation failed: {}", e)))
         }
     }
+}
+
+async fn handle_delete(resource_type: String, name: String, cluster: Option<String>) -> Result<()> {
+    use crate::error::NokubeError;
+    let cluster_name = cluster.unwrap_or_else(|| "default".to_string());
+    info!("Deleting {} '{}' from cluster: {}", resource_type, name, cluster_name);
+
+    let config_manager = ConfigManager::new().await?;
+    let etcd = config_manager.get_etcd_manager();
+
+    let key = match resource_type.to_lowercase().as_str() {
+        "deployment" | "deploy" | "deployments" => format!("/nokube/{}/deployments/{}", cluster_name, name),
+        "daemonset" | "ds" | "daemonsets" => format!("/nokube/{}/daemonsets/{}", cluster_name, name),
+        "pod" | "pods" => format!("/nokube/{}/pods/{}", cluster_name, name),
+        "configmap" | "cm" | "configmaps" => format!("/nokube/{}/configmaps/{}", cluster_name, name),
+        "secret" | "secrets" => format!("/nokube/{}/secrets/{}", cluster_name, name),
+        other => {
+            return Err(NokubeError::Config(format!("Unsupported resource type: {}", other)));
+        }
+    };
+
+    etcd.delete(key.clone()).await
+        .map_err(|e| NokubeError::Config(format!("Failed to delete key {}: {}", key, e)))?;
+    info!("Deleted key: {}", key);
+    println!("Deleted {} '{}' from cluster '{}'", resource_type, name, cluster_name);
+    println!("Note: Service agent will stop related containers shortly.");
+    Ok(())
 }
 
 async fn handle_apply(file: Option<String>, cluster: Option<String>, dry_run: bool) -> Result<()> {
@@ -522,12 +579,23 @@ async fn apply_gitops_cluster(doc: &serde_yaml::Value, cluster_name: &str, name:
         let deployment_name = deployment.get("name").and_then(|n| n.as_str()).unwrap_or("gitops-controller");
         apply_deployment(&deployment_doc, cluster_name, deployment_name).await?;
     }
-    
-    // 应用Webhook Deployment
-    if let Some(webhook_deployment) = spec.get("webhookDeployment") {
-        let webhook_doc = create_deployment_from_spec(webhook_deployment, cluster_name)?;
-        let webhook_name = webhook_deployment.get("name").and_then(|n| n.as_str()).unwrap_or("gitops-webhook");
-        apply_deployment(&webhook_doc, cluster_name, webhook_name).await?;
+    // 为保证简单性，移除 webhook 相关逻辑
+    // 清理历史 webhook 部署（如存在）
+    {
+        if let Ok(config_manager) = ConfigManager::new().await {
+            let etcd = config_manager.get_etcd_manager();
+            let legacy_key = format!("/nokube/{}/deployments/gitops-webhook-server-{}", cluster_name, cluster_name);
+            if let Err(e) = etcd.delete(legacy_key.clone()).await {
+                warn!("Failed to delete legacy webhook deployment key {}: {}", legacy_key, e);
+            } else {
+                info!("Cleaned up legacy webhook deployment etcd key for cluster {}", cluster_name);
+            }
+            // 同步清理 pods 和 events 信息
+            let pod_key = format!("/nokube/{}/pods/gitops-webhook-server-{}", cluster_name, cluster_name);
+            let events_key = format!("/nokube/{}/events/pod/gitops-webhook-server-{}", cluster_name, cluster_name);
+            let _ = etcd.delete(pod_key).await;
+            let _ = etcd.delete(events_key).await;
+        }
     }
     
     Ok(())
@@ -939,9 +1007,12 @@ nodes:
   - ssh_url: "10.0.0.1:22"
     name: "head-node"  # 实际系统看到的节点名
     role: "head"
-    storage:
-      type: "local"
-      path: "/opt/nokube/data/ray/head"
+    # 建议：设置 workspace 作为该节点的工作与存储根目录
+    workspace: "/opt/nokube-workspace"
+    # 可选：单独指定存储子路径（相对于 workspace）；若不配置则直接使用 workspace
+    # storage:
+    #   type: "local"
+    #   path: "/data/ray/head"
     users:
       - userid: "your-username"
         password: "your-password"
@@ -953,9 +1024,10 @@ nodes:
   - ssh_url: "10.0.0.2:22"
     name: "worker-node-1"   # 实际系统看到的节点名
     role: "worker"
-    storage:
-      type: "local"
-      path: "/opt/nokube/data/ray/worker-1"
+    workspace: "/opt/nokube-workspace"
+    # storage:
+    #   type: "local"
+    #   path: "/data/ray/worker-1"
     users:
       - userid: "your-username"
         password: "your-password"

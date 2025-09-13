@@ -109,6 +109,7 @@ impl ServiceModeAgent {
         // 开始收集关键容器的日志
         log_collector.follow_docker_logs("nokube-grafana").await?;
         log_collector.follow_docker_logs("nokube-greptimedb").await?;
+        let _ = log_collector.follow_docker_logs("nokube-httpserver").await;
         // 追加：跟随已有的 actor 容器日志（前缀 nokube-pod-）
         let runtime_path = DockerRunner::get_runtime_path().unwrap_or_else(|_| "docker".to_string());
         if let Ok(output) = std::process::Command::new(runtime_path)
@@ -169,6 +170,8 @@ impl ServiceModeAgent {
         
         // 启动k8s对象监控协程
         self.start_k8s_object_monitor().await?;
+        // 启动孤儿容器回收器
+        self.start_orphan_reaper().await?;
         
         // 持续运行，等待关闭信号
         self.process_manager.wait_for_shutdown_signal().await;
@@ -289,6 +292,36 @@ providers:
             }
             let dash_nokube_dir = format!("{}/nokube", dash_dir);
             let _ = std::fs::create_dir_all(&dash_nokube_dir);
+            // Write a simple Home dashboard with useful links
+            let head_ip = if let Some(head_node) = self.config.nodes.iter().find(|n| matches!(n.role, crate::config::cluster_config::NodeRole::Head)) {
+                head_node.get_ip().unwrap_or("127.0.0.1")
+            } else { "127.0.0.1" };
+            let grafana_port = self.config.task_spec.monitoring.grafana.port;
+            let greptime_port = self.config.task_spec.monitoring.greptimedb.port;
+            let http_link = format!("http://{}:{}", head_ip, self.config.task_spec.monitoring.httpserver.port);
+            let home_markdown = format!(
+                "# NoKube Links\\n\\n- GreptimeDB HTTP: [http://{head}:{gport}](http://{head}:{gport})\\n- Grafana: [http://{head}:{gfport}](http://{head}:{gfport})\\n- HTTP Server: [{http}]({http})",
+                head=head_ip, gfport=grafana_port, gport=greptime_port, http=http_link
+            );
+            let home_dash_json_path = format!("{}/nokube-home.json", dash_nokube_dir);
+            let home_dash = serde_json::json!({
+                "id": null,
+                "uid": "nokube-home",
+                "title": "NoKube Home",
+                "tags": ["nokube", "home", "links"],
+                "timezone": "browser",
+                "panels": [
+                    {"id": 1, "title": "Links", "type": "text",
+                     "gridPos": {"h": 6, "w": 24, "x": 0, "y": 0},
+                     "options": {"mode": "markdown", "content": home_markdown}
+                    }
+                ],
+                "time": {"from": "now-1h", "to": "now"},
+                "refresh": "",
+                "schemaVersion": 16,
+                "version": 0
+            });
+            let _ = std::fs::write(&home_dash_json_path, serde_json::to_string_pretty(&home_dash).unwrap_or_else(|_| String::new()));
             let mysql_dash_json = format!("{}/nokube-logs-mysql.json", dash_nokube_dir);
             // Always write dashboard JSON to ensure layout and queries are updated
             let dash_json = serde_json::json!({
@@ -728,10 +761,42 @@ if __name__ == "__main__":
 
     async fn start_bound_services(&mut self) -> Result<()> {
         info!("Starting bound services");
-        
-        // Services are not part of cluster config anymore - they should be managed separately
-        // This is a placeholder for future service management implementation
-        
+        // HTTP file server (head node only, always enabled)
+        let http_port = self.config.task_spec.monitoring.httpserver.port;
+        if let Some(head) = self.config.nodes.iter().find(|n| matches!(n.role, crate::config::cluster_config::NodeRole::Head)) {
+            let head_name = &head.name;
+            if &self.node_id == head_name {
+                // Determine workspace and fixed mount path
+                let workspace = head.workspace.clone().unwrap_or_else(|| "/opt/devcon/pa/nokube-workspace".to_string());
+                let host_dir = format!("{}/{}", workspace, crate::config::cluster_config::HTTP_SERVER_MOUNT_SUBPATH);
+                // Ensure host dir exists
+                let _ = std::fs::create_dir_all(&host_dir);
+
+                let container_name = "nokube-httpserver";
+                let image = "python:3.10-slim".to_string();
+                let run = DockerRunConfig::new(container_name.to_string(), image)
+                    .add_volume(host_dir.clone(), "/srv/http".to_string(), true)
+                    .add_port(http_port, 8080)
+                    .command(vec![
+                        "python".to_string(), "-m".to_string(), "http.server".to_string(),
+                        "8080".to_string(), "--directory".to_string(), "/srv/http".to_string()
+                    ]);
+                // Try to run
+                match DockerRunner::run(&run) {
+                    Ok(id) => {
+                        info!("Started HTTP server '{}' (container id: {}), serving {} on /srv/http, port {}->8080", container_name, id, host_dir, http_port);
+                        info!("HTTP artifacts path (host): {}", host_dir);
+                        info!("HTTP server URL: http://{}:{}", head.get_ip().unwrap_or("127.0.0.1"), http_port);
+                    }
+                    Err(e) => {
+                        warn!("Failed to start HTTP server container '{}': {}", container_name, e);
+                    }
+                }
+            } else {
+                info!("HTTP server runs only on head node: {} (current={})", head_name, self.node_id);
+            }
+        }
+
         info!("Bound services started");
         Ok(())
     }
@@ -1106,6 +1171,13 @@ if __name__ == "__main__":
                     match etcd_manager_clone.get_prefix(deployment_prefix.clone()).await {
                         Ok(deployment_kvs) => {
                             info!("Deployment monitor: total keys={} (seen={})", deployment_kvs.len(), seen_deploy_keys.len());
+                            // 收集当前存在的 deployment keys
+                            let mut current_keys: HashSet<String> = HashSet::new();
+                            for kv in &deployment_kvs {
+                                current_keys.insert(String::from_utf8_lossy(&kv.key).to_string());
+                            }
+
+                            // 处理新增的 deployments
                             for kv in deployment_kvs {
                                 let key_str = String::from_utf8_lossy(&kv.key).to_string();
                                 if !seen_deploy_keys.contains(&key_str) {
@@ -1131,6 +1203,38 @@ if __name__ == "__main__":
                                     }
                                 }
                             }
+
+                            // 处理已删除的 deployments：清理对应容器与状态
+                            let removed: Vec<String> = seen_deploy_keys
+                                .difference(&current_keys)
+                                .cloned()
+                                .collect();
+                            for key in &removed {
+                                if let Some(deployment_name) = key.split('/').last() {
+                                    let container_name = format!("nokube-pod-{}", deployment_name);
+                                    info!("🧹 Detected removed deployment '{}', stopping container '{}'", deployment_name, container_name);
+                                    // 停止并删除容器（忽略错误，尽力而为）
+                                    if let Err(e) = crate::agent::general::DockerRunner::stop(&container_name) {
+                                        tracing::warn!("Failed to stop container {}: {}", container_name, e);
+                                    }
+                                    if let Err(e) = crate::agent::general::DockerRunner::remove_container(&container_name) {
+                                        tracing::warn!("Failed to remove container {}: {}", container_name, e);
+                                    }
+
+                                    // 清理etcd中的 pod 和 events 信息
+                                    let pod_key = format!("/nokube/{}/pods/{}", cluster_name, deployment_name);
+                                    if let Err(e) = etcd_manager_clone.delete(pod_key.clone()).await {
+                                        tracing::warn!("Failed to delete pod key {}: {}", pod_key, e);
+                                    }
+                                    let events_key = format!("/nokube/{}/events/pod/{}", cluster_name, deployment_name);
+                                    if let Err(e) = etcd_manager_clone.delete(events_key.clone()).await {
+                                        tracing::warn!("Failed to delete events key {}: {}", events_key, e);
+                                    }
+                                }
+                            }
+
+                            // 用当前 keys 覆盖已见集合，保持与etcd一致
+                            seen_deploy_keys = current_keys;
                         }
                         Err(e) => {
                             warn!("Failed to check deployments: {}", e);
@@ -1169,6 +1273,63 @@ if __name__ == "__main__":
         }
         Ok(())
     }
+
+    /// 启动孤儿容器回收协程：清理没有对应etcd key的 nokube-pod-* 容器
+    async fn start_orphan_reaper(&mut self) -> Result<()> {
+        if let Some(etcd_manager) = &self.etcd_manager {
+            let etcd_manager = Arc::clone(etcd_manager);
+            let cluster_name = self.cluster_name.clone();
+            tokio::spawn(async move {
+                let mut ticker = tokio::time::interval(tokio::time::Duration::from_secs(60));
+                loop {
+                    ticker.tick().await;
+                    // 列出本机容器名称
+                    let runtime_path = DockerRunner::get_runtime_path().unwrap_or_else(|_| "docker".to_string());
+                    match std::process::Command::new(&runtime_path)
+                        .args(["ps", "--format", "{{.Names}}"])
+                        .output() {
+                        Ok(output) if output.status.success() => {
+                            let names = String::from_utf8_lossy(&output.stdout);
+                            for name in names.lines() {
+                                if let Some(stripped) = name.strip_prefix("nokube-pod-") {
+                                    // 检查是否存在对应的etcd deployment key
+                                    let dep_key = format!("/nokube/{}/deployments/{}", cluster_name, stripped);
+                                    let pod_key = format!("/nokube/{}/pods/{}", cluster_name, stripped);
+                                    let mut is_orphan = false;
+                                    if let Ok(kvs) = etcd_manager.get(dep_key.clone()).await {
+                                        if kvs.is_empty() { is_orphan = true; }
+                                    } else {
+                                        is_orphan = true;
+                                    }
+
+                                    if is_orphan {
+                                        info!("🧹 Orphan reaper: stopping orphan container '{}' (no etcd key)", name);
+                                        if let Err(e) = DockerRunner::stop(name) {
+                                            warn!("Orphan reaper: failed to stop {}: {}", name, e);
+                                        }
+                                        if let Err(e) = DockerRunner::remove_container(name) {
+                                            warn!("Orphan reaper: failed to remove {}: {}", name, e);
+                                        }
+                                        // 清理相关 etcd pod/events
+                                        let _ = etcd_manager.delete(pod_key.clone()).await;
+                                        let events_key = format!("/nokube/{}/events/pod/{}", cluster_name, stripped);
+                                        let _ = etcd_manager.delete(events_key).await;
+                                    }
+                                }
+                            }
+                        }
+                        Ok(output) => {
+                            warn!("Orphan reaper: failed to list containers (code={:?})", output.status.code());
+                        }
+                        Err(e) => {
+                            warn!("Orphan reaper: error executing runtime list: {}", e);
+                        }
+                    }
+                }
+            });
+        }
+        Ok(())
+    }
     
     /// 统一的deployment容器创建方法 - 使用最新的DockerRunner
     async fn create_deployment_container_unified(
@@ -1198,16 +1359,12 @@ if __name__ == "__main__":
             // 标准Kubernetes Deployment格式: 直接使用spec
             info!("🎯 Processing standard K8s Deployment format");
             spec
-        } else if let Some(webhook_deploy) = spec.get("webhookDeployment") {
-            // GitOpsCluster格式: webhookDeployment
-            info!("🎯 Processing GitOpsCluster webhookDeployment format");
-            webhook_deploy
         } else if let Some(deploy) = spec.get("deployment") {
             // GitOpsCluster格式: deployment
             info!("🎯 Processing GitOpsCluster deployment format");
             deploy
         } else {
-            return Err(anyhow::anyhow!("Missing template/deployment/webhookDeployment in spec"));
+            return Err(anyhow::anyhow!("Missing template or deployment in spec"));
         };
         
         // 提取containerSpec - 需要支持多种YAML格式

@@ -28,13 +28,15 @@ class GitHubConfig:
     repo_name: str
     branch: str
     token: str
+    key: Optional[str] = None  # 可选：当从映射加载时的键名
 
 @dataclass
 class ServiceConfig:
     """单个服务配置"""
     name: str
-    repo: str  # GitHub仓库URL
     k8s_yaml_dir: str  # k8s YAML文件目录
+    repo: Optional[str] = None  # 兼容旧版：GitHub仓库URL
+    github: Optional[str] = None  # 新版：引用 github_configs 中的 key
 
 @dataclass
 class GitOpsConfig:
@@ -42,7 +44,8 @@ class GitOpsConfig:
     github_configs: List[GitHubConfig]
     services: List[ServiceConfig]
     poll_interval: int = 60  # 轮询间隔（秒）
-    webhook_url: Optional[str] = None  # 可选的webhook通知
+    webhook_url: Optional[str] = None  # 保留字段；当前示例仅轮询
+    applyer_nokube: Optional[Dict] = None  # 供本地 nokube applyer 使用
     
     @classmethod
     def from_secret(cls, secret_path: str) -> 'GitOpsConfig':
@@ -55,30 +58,89 @@ class GitOpsConfig:
         with open(config_file, 'r', encoding='utf-8') as f:
             config_data = json.load(f)
         
-        # 解析GitHub配置
-        github_configs = []
-        for gh_config in config_data.get('github_configs', []):
-            github_configs.append(GitHubConfig(
-                repo_owner=gh_config['repo_owner'],
-                repo_name=gh_config['repo_name'],
-                branch=gh_config['branch'],
-                token=gh_config['token']
-            ))
+        # 解析GitHub配置（支持 list 或 dict 两种格式）
+        github_configs: List[GitHubConfig] = []
+        gh_raw = config_data.get('github_configs', [])
+        if isinstance(gh_raw, dict):
+            for key, gh in gh_raw.items():
+                github_configs.append(GitHubConfig(
+                    repo_owner=gh['repo_owner'],
+                    repo_name=gh['repo_name'],
+                    branch=gh.get('branch', 'main'),
+                    token=gh.get('token', ''),
+                    key=key
+                ))
+        else:
+            for gh in gh_raw:
+                github_configs.append(GitHubConfig(
+                    repo_owner=gh['repo_owner'],
+                    repo_name=gh['repo_name'],
+                    branch=gh.get('branch', 'main'),
+                    token=gh.get('token', ''),
+                    key=gh.get('key') if isinstance(gh, dict) else None
+                ))
         
         # 解析服务配置
-        services = []
-        for service_config in config_data.get('services', []):
+        services: List[ServiceConfig] = []
+        for svc in config_data.get('services', []):
             services.append(ServiceConfig(
-                name=service_config['name'],
-                repo=service_config['repo'],
-                k8s_yaml_dir=service_config['k8s_yaml_dir']
+                name=svc['name'],
+                k8s_yaml_dir=svc['k8s_yaml_dir'],
+                repo=svc.get('repo'),
+                github=svc.get('github')
             ))
         
         return cls(
             github_configs=github_configs,
             services=services,
             poll_interval=config_data.get('poll_interval', 60),
-            webhook_url=config_data.get('webhook_url')
+            webhook_url=config_data.get('webhook_url'),
+            applyer_nokube=config_data.get('applyer_nokube')
+        )
+
+    @classmethod
+    def from_yaml(cls, path: str) -> 'GitOpsConfig':
+        """从挂载的 ConfigMap YAML 中读取配置"""
+        import yaml as yaml_parser
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"GitOps YAML config not found: {path}")
+        with open(path, 'r', encoding='utf-8') as f:
+            data = yaml_parser.safe_load(f) or {}
+        gh_cfgs: List[GitHubConfig] = []
+        gh_raw = data.get('github_configs', [])
+        if isinstance(gh_raw, dict):
+            for key, gh in gh_raw.items():
+                gh_cfgs.append(GitHubConfig(
+                    repo_owner=gh['repo_owner'],
+                    repo_name=gh['repo_name'],
+                    branch=gh.get('branch', 'main'),
+                    token=gh.get('token', ''),
+                    key=key
+                ))
+        else:
+            for gh in gh_raw:
+                gh_cfgs.append(GitHubConfig(
+                    repo_owner=gh['repo_owner'],
+                    repo_name=gh['repo_name'],
+                    branch=gh.get('branch', 'main'),
+                    token=gh.get('token', ''),
+                    key=gh.get('key') if isinstance(gh, dict) else None
+                ))
+
+        services: List[ServiceConfig] = []
+        for svc in data.get('services', []):
+            services.append(ServiceConfig(
+                name=svc['name'],
+                k8s_yaml_dir=svc['k8s_yaml_dir'],
+                repo=svc.get('repo'),
+                github=svc.get('github')
+            ))
+        return cls(
+            github_configs=gh_cfgs,
+            services=services,
+            poll_interval=int(data.get('poll_interval', 60)),
+            webhook_url=data.get('webhook_url'),
+            applyer_nokube=data.get('applyer_nokube')
         )
 
 class GitHubClient:
@@ -123,11 +185,28 @@ class GitOpsController:
     
     def __init__(self, config: GitOpsConfig):
         self.config = config
-        # 为每个GitHub配置创建客户端
-        self.github_clients = {}
+        # Optional: setup nokube applyer if configured
+        self.applyer = None
+        if self.config.applyer_nokube:
+            try:
+                from .applyer_nokube import NokubeApplyer  # if used as a module
+            except ImportError:
+                # fall back to same-dir import when not as a package
+                from applyer_nokube import NokubeApplyer
+            self.applyer = NokubeApplyer(self.config.applyer_nokube)
+            ok, msg = self.applyer.install()
+            if ok:
+                logger.info(f"Nokube applyer installed: {msg}")
+            else:
+                logger.warning(f"Nokube applyer install failed: {msg}")
+        # 为每个GitHub配置创建客户端 + 快速索引
+        self.github_clients: Dict[str, GitHubClient] = {}
+        self.github_by_key: Dict[str, GitHubConfig] = {}
         for gh_config in config.github_configs:
             client_key = f"{gh_config.repo_owner}/{gh_config.repo_name}"
-            self.github_clients[client_key] = GitHubClient(gh_config.token)
+            self.github_clients.setdefault(client_key, GitHubClient(gh_config.token))
+            if gh_config.key:
+                self.github_by_key[gh_config.key] = gh_config
         
         # 状态存储在内存中，不依赖本地文件
         self.current_state = {}
@@ -138,21 +217,30 @@ class GitOpsController:
         new_state = {}
         
         for service in self.config.services:
-            # 解析GitHub仓库信息
-            repo_url = service.repo
-            if repo_url.startswith('https://github.com/'):
-                repo_path = repo_url.replace('https://github.com/', '').rstrip('/')
-                repo_owner, repo_name = repo_path.split('/')
-            else:
-                logger.warning(f"Unsupported repo URL format: {repo_url}")
-                continue
-            
-            # 找到对应的GitHub配置
+            # 解析GitHub仓库信息（优先使用 github key；回退到 repo URL）
+            repo_owner = repo_name = None
             github_config = None
-            for gh_config in self.config.github_configs:
-                if gh_config.repo_owner == repo_owner and gh_config.repo_name == repo_name:
-                    github_config = gh_config
-                    break
+            if service.github:
+                github_config = self.github_by_key.get(service.github)
+                if not github_config:
+                    logger.warning(f"Unknown github key in service '{service.name}': {service.github}")
+                    continue
+                repo_owner, repo_name = github_config.repo_owner, github_config.repo_name
+            elif service.repo:
+                repo_url = service.repo
+                if repo_url.startswith('https://github.com/'):
+                    repo_path = repo_url.replace('https://github.com/', '').rstrip('/')
+                    parts = repo_path.split('/')
+                    if len(parts) >= 2:
+                        repo_owner, repo_name = parts[0], parts[1]
+                if not repo_owner:
+                    logger.warning(f"Unsupported repo URL format: {repo_url}")
+                    continue
+                # 匹配对应的 GitHub 配置（用于 token/branch）
+                for gh in self.config.github_configs:
+                    if gh.repo_owner == repo_owner and gh.repo_name == repo_name:
+                        github_config = gh
+                        break
             
             if not github_config:
                 logger.warning(f"No GitHub config found for {repo_owner}/{repo_name}")
@@ -246,9 +334,7 @@ class GitOpsController:
             # 处理k8s YAML文件
             self.handle_k8s_yaml_file(service_name, file_path, content, new_sha)
             
-            # 发送webhook通知（如果配置了）
-            if self.config.webhook_url:
-                self.send_webhook_notification(change)
+            # 简化：当前示例仅轮询触发，不发送 webhook 通知
     
     def handle_k8s_yaml_file(self, service_name: str, file_path: str, content: str, sha: str):
         """处理k8s YAML文件变化 - 无状态处理"""
@@ -424,21 +510,20 @@ cd /app && tar -xzf app.tar.gz
             logger.warning(f"Unexpected secret type: {secret_type}")
     
     def handle_yaml_file(self, file_path: str, content: str, sha: str):
-        """处理YAML文件变化"""
+        """处理通用 YAML 文件变化（非 K8s 资源）
+
+        当前实现仅将文件持久化，留待上层流程或后续处理；不直接触发集群应用。
+        """
         logger.info(f"Handling YAML file: {file_path}")
-        
+
         # 保存文件到本地
         local_file = f'/pod-workspace/deploy/{os.path.basename(file_path)}'
         os.makedirs(os.path.dirname(local_file), exist_ok=True)
-        
+
         with open(local_file, 'w', encoding='utf-8') as f:
             f.write(content)
-        
+
         logger.info(f"YAML file saved to: {local_file}")
-        
-        # 这里可以调用kubectl apply或NoKube的部署API
-        # 示例：触发NoKube部署
-        self.apply_nokube_manifest(local_file, file_path, sha)
     
     def handle_json_file(self, file_path: str, content: str, sha: str):
         """处理JSON配置文件变化"""
@@ -468,56 +553,27 @@ cd /app && tar -xzf app.tar.gz
         logger.info(f"File saved to: {local_file}")
     
     def apply_nokube_manifest(self, service_name: str, yaml_content: str, original_path: str, sha: str):
-        """直接应用NoKube清单到集群 - 无状态操作"""
+        """直接应用 NoKube 清单到集群（无回退路径）"""
         logger.info(f"Applying NoKube manifest for service {service_name}: {original_path} (SHA: {sha})")
-        
-        # 调用NoKube API或kubectl apply（根据实际部署环境）
+
         try:
-            # 选项1：调用NoKube API
-            self.call_nokube_api(service_name, yaml_content, sha)
-            
-            # 选项2：使用kubectl apply（如果NoKube集群支持）
-            # self.kubectl_apply(yaml_content, service_name)
-            
-            logger.info(f"Successfully applied manifest for service {service_name}")
-            
-            # 发送成功通知（可选）
+            if self.applyer is None:
+                raise RuntimeError("No Applyer configured. Provide applyer_nokube in config to enable apply().")
+
+            ok, out = self.applyer.apply(yaml_content)
+            if not ok:
+                raise RuntimeError(f"nokube apply failed: {out.strip()[:400]}")
+
+            logger.info(f"nokube apply succeeded: {out.strip()[:200]}")
             if self.config.webhook_url:
                 self.send_apply_notification(service_name, original_path, sha, "success")
-                
+
         except Exception as e:
             logger.error(f"Failed to apply manifest for service {service_name}: {e}")
-            
-            # 发送失败通知
             if self.config.webhook_url:
                 self.send_apply_notification(service_name, original_path, sha, "failed", str(e))
     
-    def call_nokube_api(self, service_name: str, yaml_content: str, sha: str):
-        """调用NoKube API应用清单"""
-        # 这里应该调用实际的NoKube API
-        nokube_api_url = os.getenv('NOKUBE_API_URL', 'http://nokube-api:8080')
-        
-        payload = {
-            'service_name': service_name,
-            'yaml_content': yaml_content,
-            'sha': sha,
-            'timestamp': time.time()
-        }
-        
-        headers = {
-            'Content-Type': 'application/json',
-            'Authorization': f'Bearer {os.getenv("NOKUBE_TOKEN", "")}'
-        }
-        
-        response = requests.post(
-            f'{nokube_api_url}/api/v1/apply',
-            json=payload,
-            headers=headers,
-            timeout=30
-        )
-        
-        response.raise_for_status()
-        logger.info(f"NoKube API response: {response.json()}")
+    # 已移除: HTTP API 回退 (call_nokube_api)
     
     def kubectl_apply(self, yaml_content: str, service_name: str):
         """使用kubectl apply应用清单（备选方案）"""
@@ -617,11 +673,8 @@ cd /app && tar -xzf app.tar.gz
     
     def run(self):
         """运行GitOps控制器"""
-        logger.info("Starting GitOps controller")
-        logger.info(f"Repository: {self.config.repo_owner}/{self.config.repo_name}")
-        logger.info(f"Branch: {self.config.branch}")
-        logger.info(f"Target files: {self.config.target_files}")
-        logger.info(f"Poll interval: {self.config.poll_interval}s")
+        logger.info("Starting GitOps controller (polling only)")
+        logger.info(f"Configured repos: {len(self.config.github_configs)}; services: {len(self.config.services)}; poll: {self.config.poll_interval}s")
         
         while True:
             try:
@@ -643,9 +696,15 @@ cd /app && tar -xzf app.tar.gz
 def main():
     """主函数"""
     try:
-        # 从挂载的secret中读取配置
-        secret_path = '/pod-workspace/secret'
-        config = GitOpsConfig.from_secret(secret_path)
+        # 优先从 ConfigMap (YAML) 加载；如不存在则回退到 Secret(JSON)
+        cfg_path = os.getenv('GITOPS_CONFIG', '/etc/gitops/gitops-config.yaml')
+        if os.path.exists(cfg_path):
+            logger.info(f"Loading GitOps config from YAML: {cfg_path}")
+            config = GitOpsConfig.from_yaml(cfg_path)
+        else:
+            secret_path = '/pod-workspace/secret'
+            logger.info(f"Fallback: loading GitOps config from Secret JSON: {secret_path}")
+            config = GitOpsConfig.from_secret(secret_path)
         
         # 创建并运行GitOps控制器
         controller = GitOpsController(config)

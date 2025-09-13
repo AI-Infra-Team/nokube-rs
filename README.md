@@ -52,6 +52,7 @@ nokube new-or-update [config-file]
 
 监控
 - greptime和grafana均属于关联服务，使用docker启动，使用节点对应ip（在cluster config中）进行连接（不要搞默认值，localhost这种）
+- 可选：在 head 节点绑定一个简单的 HTTP 文件服务（python:3.10-slim），将 `workspace/<subpath>` 目录以只读方式挂载（默认子路径 `public_file_server`），默认端口 8088；Grafana 首页会展示 Greptime 与该 HTTP 服务的超链接。
 - **日志收集**: 使用 OpenTelemetry OTLP/HTTP 协议原生发送到GreptimeDB
   - OTLP API: `http://<host>:4000/v1/otlp/v1/logs`
   - Headers: `X-Greptime-DB-Name: logs`, `X-Greptime-Log-Table-Name: nokube_logs`

@@ -1,3 +1,6 @@
 target
 tmp
 ._*
+.obsidian
+dlog
+log

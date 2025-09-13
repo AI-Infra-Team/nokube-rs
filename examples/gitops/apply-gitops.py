@@ -10,6 +10,7 @@ import json
 import yaml
 import base64
 import argparse
+import time
 from typing import List, Dict
 
 def encode_secret_data(data: str) -> str:
@@ -20,7 +21,6 @@ def create_gitops_config(
     github_configs: List[Dict],
     services: List[Dict],
     poll_interval: int = 60,
-    webhook_url: str = None
 ) -> dict:
     """创建GitOps配置"""
     
@@ -29,10 +29,6 @@ def create_gitops_config(
         "services": services,
         "poll_interval": poll_interval
     }
-    
-    if webhook_url:
-        config["webhook_url"] = webhook_url
-    
     return config
 
 def generate_nokube_manifest(
@@ -40,13 +36,12 @@ def generate_nokube_manifest(
     github_configs: List[Dict],
     services: List[Dict],
     poll_interval: int = 60,
-    webhook_url: str = None
 ) -> dict:
     """生成完全无状态的NoKube GitOps清单"""
     
     # 创建GitOps配置
     gitops_config = create_gitops_config(
-        github_configs, services, poll_interval, webhook_url
+        github_configs, services, poll_interval
     )
     
     # 准备Secret数据（只存储敏感信息）
@@ -130,45 +125,6 @@ if __name__ == "__main__":
     controller.run()
 '''
     
-    # Webhook服务器Python代码
-    webhook_server_code = '''#!/usr/bin/env python3
-from flask import Flask, request, jsonify
-import logging
-import os
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger('webhook-server')
-
-app = Flask(__name__)
-
-@app.route('/webhook', methods=['POST'])
-def webhook():
-    """接收Webhook事件"""
-    try:
-        data = request.json
-        logger.info(f"Received webhook: {data}")
-        
-        # 处理GitOps事件
-        if data and 'event' in data:
-            event_type = data['event']
-            logger.info(f"Processing event: {event_type}")
-        
-        return jsonify({"status": "ok", "message": "Event processed"})
-    
-    except Exception as e:
-        logger.error(f"Error processing webhook: {e}")
-        return jsonify({"status": "error", "message": str(e)}), 500
-
-@app.route('/health', methods=['GET'])
-def health():
-    """健康检查"""
-    return jsonify({"status": "healthy"})
-
-if __name__ == "__main__":
-    host = os.getenv('FLASK_HOST', '0.0.0.0')
-    port = int(os.getenv('FLASK_PORT', '8080'))
-    app.run(host=host, port=port, debug=False)
-'''
     
     manifest = {
         "apiVersion": "nokube.io/v1",
@@ -186,8 +142,7 @@ if __name__ == "__main__":
                 "data": {
                     "gitops-config.json": config_data["gitops-config.json"],
                     "gitops-controller.py": gitops_controller_code,
-                    "webhook-server.py": webhook_server_code,
-                    "requirements.txt": "requests==2.31.0\nPyYAML==6.0.1\nflask==2.3.2"
+                    "requirements.txt": "requests==2.31.0\nPyYAML==6.0.1"
                 }
             },
             
@@ -225,46 +180,10 @@ if __name__ == "__main__":
                         }
                     ]
                 }
-            },
-            
-            # Webhook Server Deployment
-            "webhookDeployment": {
-                "name": f"gitops-webhook-server-{cluster_name}",
-                "replicas": 2,
-                "nodeAffinity": {
-                    "preferred": [{
-                        "weight": 50,
-                        "preference": {
-                            "matchExpressions": [{
-                                "key": "node-role.nokube.io/worker",
-                                "operator": "In", 
-                                "values": ["true"]
-                            }]
-                        }
-                    }]
-                },
-                "containerSpec": {
-                    "name": "webhook-server",
-                    "image": "python:3.10-slim",
-                    "command": ["/bin/bash"],
-                    "args": ["-c", "pip install -r /etc/config/requirements.txt && python /etc/config/webhook-server.py"],
-                    "env": {
-                        "FLASK_HOST": "0.0.0.0",
-                        "FLASK_PORT": "8080",
-                        "PYTHONUNBUFFERED": "1"
-                    },
-                    "volumeMounts": [
-                        {
-                            "name": "config-volume",
-                            "mountPath": "/etc/config",
-                            "readOnly": True
-                        }
-                    ]
-                }
             }
         }
     }
-    
+
     return manifest
 
 def main():
@@ -289,7 +208,6 @@ def main():
     github_configs = config_data.get('github_configs', [])
     services = config_data.get('services', [])
     poll_interval = config_data.get('poll_interval', 60)
-    webhook_url = config_data.get('webhook_url')
     
     if not github_configs:
         print("Error: No github_configs found in configuration file")
@@ -305,7 +223,6 @@ def main():
         github_configs=github_configs,
         services=services,
         poll_interval=poll_interval,
-        webhook_url=webhook_url
     )
     
     if args.dry_run:
@@ -317,40 +234,98 @@ def main():
     else:
         # 直接部署到NoKube
         success = deploy_to_nokube(manifest, args.cluster_name)
-        
+
         if success:
             print(f"✅ GitOps successfully deployed to cluster: {args.cluster_name}")
             print(f"🏷️  Target cluster: {args.cluster_name}")
             print(f"📦 GitHub configs: {len(github_configs)} repositories")
             print(f"🔧 Services: {len(services)} services")
-            
-            if webhook_url:
-                print(f"🔗 Webhook URL: {webhook_url}")
-            
-            print(f"")
-            print(f"🚀 GitOps Controller is starting up...")
-            print(f"📊 Check deployment status with these commands:")
-            print(f"   # List all deployments in cluster")
+            print("")
+            print("🚀 GitOps Controller is starting up...")
+            print("📊 Running brief post-apply status checks...")
+
+            # Sleep a bit to allow resources to come up
+            wait_sec = int(os.getenv('NOKUBE_POST_APPLY_WAIT', '10'))
+            if wait_sec > 0:
+                time.sleep(wait_sec)
+
+            # Perform status checks (best-effort)
+            try:
+                import subprocess
+                nokube_path, lib_path = find_nokube_paths()
+                if nokube_path:
+                    # 构造运行环境以便找到动态库
+                    env = os.environ.copy()
+                    if lib_path:
+                        env['LD_LIBRARY_PATH'] = lib_path + ':' + env.get('LD_LIBRARY_PATH', '')
+
+                    # 清理可能存在的历史 webhook 部署（忽略失败）
+                    try:
+                        subprocess.run(
+                            [nokube_path, 'delete', 'deployment', f'gitops-webhook-server-{args.cluster_name}', '--cluster', args.cluster_name],
+                            capture_output=True, text=True, timeout=15, env=env
+                        )
+                    except Exception:
+                        pass
+                    _run_status_checks(nokube_path, lib_path, args.cluster_name)
+                else:
+                    print("⚠️  Skipping status checks: nokube binary not found.")
+            except Exception as e:
+                print(f"⚠️  Status checks encountered an error: {e}")
+
+            print("")
+            print("📊 You can also check with these commands:")
             print(f"   LD_LIBRARY_PATH=target ./target/nokube get deployments --cluster {args.cluster_name}")
-            print(f"   ")
-            print(f"   # List all pods in cluster")
             print(f"   LD_LIBRARY_PATH=target ./target/nokube get pods --cluster {args.cluster_name}")
-            print(f"   ")
-            print(f"   # Get detailed information about a specific deployment")
             print(f"   LD_LIBRARY_PATH=target ./target/nokube describe deployment gitops-controller-{args.cluster_name} --cluster {args.cluster_name}")
-            print(f"   ")
-            print(f"   # Get logs from GitOps controller pod")
-            print(f"   LD_LIBRARY_PATH=target ./target/nokube logs <pod-name> --cluster {args.cluster_name}")
-            print(f"   ")
-            print(f"   # List all services")
             print(f"   LD_LIBRARY_PATH=target ./target/nokube get services --cluster {args.cluster_name}")
-            print(f"   ")
-            print(f"   # Check daemon sets (background services)")
             print(f"   LD_LIBRARY_PATH=target ./target/nokube get daemonsets --cluster {args.cluster_name}")
-            print(f"📋 Use 'nokube get --help' for more resource types and output formats")
+            print("📋 Use 'nokube get --help' for more resource types and output formats")
         else:
             print(f"❌ Failed to deploy GitOps to cluster: {args.cluster_name}")
             return 1
+
+def _run_status_checks(nokube_path: str, lib_path: str, cluster_name: str):
+    import subprocess
+
+    env = os.environ.copy()
+    if lib_path:
+        env['LD_LIBRARY_PATH'] = lib_path + ':' + env.get('LD_LIBRARY_PATH', '')
+
+    def run(cmd: list, timeout: int = 30):
+        try:
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=env)
+            ok = (res.returncode == 0)
+            out = res.stdout.strip()
+            err = res.stderr.strip()
+            return ok, out, err
+        except Exception as e:
+            return False, '', str(e)
+
+    checks = [
+        [nokube_path, 'get', 'deployments', '--cluster', cluster_name],
+        [nokube_path, 'get', 'pods', '--cluster', cluster_name],
+        [nokube_path, 'get', 'services', '--cluster', cluster_name],
+        [nokube_path, 'describe', 'deployment', f'gitops-controller-{cluster_name}', '--cluster', cluster_name],
+    ]
+
+    print("— nokube get deployments —")
+    ok, out, err = run(checks[0])
+    print(out or err)
+
+    print("— nokube get pods —")
+    ok, out, err = run(checks[1])
+    print(out or err)
+
+    print("— nokube get services —")
+    ok, out, err = run(checks[2])
+    print(out or err)
+
+    print(f"— describe gitops-controller-{cluster_name} —")
+    ok, out, err = run(checks[3], timeout=60)
+    print(out or err)
+
+    # webhook 相关检查已移除以简化逻辑
 
 def deploy_to_nokube(manifest, cluster_name):
     """直接部署到NoKube集群"""

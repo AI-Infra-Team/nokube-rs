@@ -412,6 +412,11 @@ isDefault = true
 
     async fn import_cluster_dashboard(&self) -> Result<()> {
         // Create a default dashboard with panels for CPU, memory, and network metrics
+        let links_md = format!(
+            "### 关键服务\n\n- [Actor Dashboard](/d/nokube-actor-dashboard)\n- [Logs (MySQL)](/d/nokube-logs-mysql)\n- [Greptime Metrics]({}/v1/prometheus)\n",
+            self.greptimedb_endpoint
+        );
+
         let dashboard_config = serde_json::json!({
             "dashboard": {
                 "id": null,
@@ -419,6 +424,11 @@ isDefault = true
                 "title": "NoKube Cluster Monitoring",
                 "tags": ["nokube", "cluster"],
                 "timezone": "browser",
+                "links": [
+                    {"type": "link", "title": "Actor Dashboard", "url": "/d/nokube-actor-dashboard", "targetBlank": true},
+                    {"type": "link", "title": "Logs (MySQL)", "url": "/d/nokube-logs-mysql", "targetBlank": true},
+                    {"type": "link", "title": "Greptime Metrics", "url": format!("{}/v1/prometheus", self.greptimedb_endpoint), "targetBlank": true}
+                ],
                 "panels": [
                     {
                         "id": 1,
@@ -449,7 +459,14 @@ isDefault = true
                         "stack": false,
                         "steppedLine": false,
                         "nullPointMode": "null as zero",
-                        "gridPos": {"h": 9, "w": 8, "x": 0, "y": 0}
+                        "gridPos": {"h": 9, "w": 8, "x": 8, "y": 0}
+                    },
+                    {
+                        "id": 10,
+                        "title": "关键链接",
+                        "type": "text",
+                        "gridPos": {"h": 9, "w": 8, "x": 0, "y": 0},
+                        "options": {"mode": "markdown", "content": links_md}
                     },
                     {
                         "id": 2,
@@ -468,7 +485,7 @@ isDefault = true
                             {"alias": "Cluster Total", "stack": false, "lines": true, "fill": 0, "linewidth": 1}
                         ],
                         "spaceLength": 10, "stack": true, "steppedLine": false, "nullPointMode": "null as zero",
-                        "gridPos": {"h": 9, "w": 8, "x": 8, "y": 0}
+                        "gridPos": {"h": 9, "w": 8, "x": 16, "y": 0}
                     },
                     {
                         "id": 3,
@@ -605,7 +622,51 @@ isDefault = true
             let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
             anyhow::bail!("Failed to import cluster dashboard: {} - {}", status, error_text);
         }
-        
+        // Set home dashboard to cluster
+        if let Err(e) = self.set_home_dashboard("nokube-cluster-monitoring").await {
+            info!("Failed to set home dashboard: {}", e);
+        }
+
+        Ok(())
+    }
+
+    async fn set_home_dashboard(&self, uid: &str) -> Result<()> {
+        let client = reqwest::Client::new();
+        let prefs_url = format!("http://localhost:{}/api/org/preferences", self.port);
+        let body = serde_json::json!({
+            "homeDashboardUID": uid
+        });
+        let resp = client
+            .put(&prefs_url)
+            .header("Content-Type", "application/json")
+            .basic_auth("admin", Some("admin"))
+            .json(&body)
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            anyhow::bail!("Failed to set home dashboard: {} - {}", status, text);
+        }
+        // Star the dashboard
+        let get_url = format!("http://localhost:{}/api/dashboards/uid/{}", self.port, uid);
+        let dash = client
+            .get(&get_url)
+            .basic_auth("admin", Some("admin"))
+            .send()
+            .await?;
+        if dash.status().is_success() {
+            if let Ok(val) = dash.json::<serde_json::Value>().await {
+                if let Some(id) = val.get("dashboard").and_then(|d| d.get("id")).and_then(|v| v.as_i64()) {
+                    let star_url = format!("http://localhost:{}/api/user/stars/dashboard/{}", self.port, id);
+                    let _ = client
+                        .post(&star_url)
+                        .basic_auth("admin", Some("admin"))
+                        .send()
+                        .await;
+                }
+            }
+        }
         Ok(())
     }
 
@@ -616,6 +677,7 @@ isDefault = true
         let service_dashboard_config = serde_json::json!({
             "dashboard": {
                 "id": null,
+                "uid": "nokube-service-dashboard",
                 "title": "NoKube Service Dashboard",
                 "tags": ["nokube", "k8s", "service"],
                 "timezone": "browser",

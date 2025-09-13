@@ -1,0 +1,13 @@
+# Sample NoKube global config for Applyer (used by nokube CLI)
+# Copy or mount this file to the path referenced by
+# gitops-config.yaml -> applyer_nokube.nokube_config_file
+#
+# Path precedence for nokube CLI:
+# - User: ~/.nokube/config.yaml (preferred)
+# - Global: /etc/.nokube/config.yaml
+
+etcd_endpoints:
+  - "http://127.0.0.1:2379"
+  # - "http://10.0.0.10:2379"
+  # - "http://10.0.0.11:2379"
+

@@ -31,10 +31,13 @@ impl DeploymentController {
         // Initialize SSH managers for all nodes
         self.initialize_ssh_managers(&cluster_config).await?;
 
-        // Prepare binary dependencies and resources
+        // Prepare local build artifacts (binary, libs, docker image tar)
         self.prepare_dependencies().await?;
 
-        // Deploy agents to all nodes
+        // Publish artifacts to head node HTTP server directory and start server if needed
+        self.publish_artifacts_to_httpserver(&cluster_config).await?;
+
+        // Deploy agents to all nodes (nodes will download artifacts from HTTP server)
         self.deploy_node_agents(&cluster_config).await?;
 
         // Update node configurations and restart agents
@@ -124,6 +127,94 @@ impl DeploymentController {
             .map_err(|e| anyhow::anyhow!("Failed to copy target/nokube to {}: {}", nokube_dst, e))?;
 
         info!("Dependencies and Docker image prepared");
+        Ok(())
+    }
+
+    /// Upload artifacts to head node's HTTP server directory and ensure the server is running.
+    async fn publish_artifacts_to_httpserver(&mut self, cluster_config: &ClusterConfig) -> Result<()> {
+        use std::path::Path;
+        info!("Publishing artifacts to head node HTTP server directory");
+
+        // Resolve head node and http server config
+        let head = cluster_config
+            .nodes
+            .iter()
+            .find(|n| matches!(n.role, crate::config::cluster_config::NodeRole::Head))
+            .ok_or_else(|| anyhow::anyhow!("Head node not found in cluster"))?;
+
+        let http_cfg = &cluster_config.task_spec.monitoring.httpserver;
+
+        let ssh_key = &head.ssh_url;
+        let ssh = self
+            .ssh_managers
+            .get(ssh_key)
+            .ok_or_else(|| anyhow::anyhow!("SSH manager for head node not initialized"))?;
+
+        let workspace = head.get_workspace()?;
+        let host_dir = format!("{}/{}", workspace, crate::config::cluster_config::HTTP_SERVER_MOUNT_SUBPATH);
+        let releases_dir = format!("{}/releases/nokube", host_dir);
+
+        // Ensure directory structure exists on head node
+        ssh.execute_command(&format!("mkdir -p {} {}/bin {}/lib", releases_dir, releases_dir, releases_dir), true, true).await
+            .map_err(|e| anyhow::anyhow!("Failed to create HTTP server directories on head node: {}", e))?;
+
+        // Upload docker image tar to releases
+        let local_image_tar = "./tmp/nokube-image.tar";
+        if Path::new(local_image_tar).exists() {
+            let remote_image_tar = format!("{}/nokube-image.tar", releases_dir);
+            info!("Uploading nokube-image.tar to head HTTP dir");
+            ssh.upload_file(local_image_tar, &remote_image_tar).await
+                .map_err(|e| anyhow::anyhow!("Failed to upload image tar to head: {}", e))?;
+        } else {
+            info!("No docker image tar found; skipping upload: {}", local_image_tar);
+        }
+
+        // Upload binary and libs
+        let local_staging_dir = "./tmp/nokube-remote-lib";
+        let remote_bin = format!("{}/bin/nokube", releases_dir);
+        let remote_lib_dir = format!("{}/lib", releases_dir);
+
+        // Upload nokube binary
+        ssh.upload_file("target/nokube", &remote_bin).await
+            .map_err(|e| anyhow::anyhow!("Failed to upload nokube binary to head: {}", e))?;
+        // Upload libs if present
+        for lib in &["libcrypto.so.1.1", "libssl.so.1.1"] {
+            let src = format!("{}/{}", local_staging_dir, lib);
+            if Path::new(&src).exists() {
+                let dst = format!("{}/{}", remote_lib_dir, lib);
+                let _ = ssh.upload_file(&src, &dst).await;
+            }
+        }
+
+        // Create a simple manifest file
+        let manifest_local = "./tmp/nokube-artifacts-manifest.json";
+        let manifest = serde_json::json!({
+            "version": "latest",
+            "files": {
+                "bin": ["bin/nokube"],
+                "lib": ["lib/libcrypto.so.1.1", "lib/libssl.so.1.1"],
+                "image": "nokube-image.tar"
+            }
+        });
+        std::fs::write(manifest_local, serde_json::to_string_pretty(&manifest)?)
+            .map_err(|e| anyhow::anyhow!("Failed to write local manifest: {}", e))?;
+        let remote_manifest = format!("{}/manifest.json", releases_dir);
+        let _ = ssh.upload_file(manifest_local, &remote_manifest).await;
+
+        // Ensure HTTP server container is running on head (best-effort)
+        let start_cmd = format!(
+            "sh -lc 'set -e; mkdir -p {host_dir}; (docker rm -f nokube-httpserver >/dev/null 2>&1 || true); \
+             docker run -d --name nokube-httpserver -p {port}:8080 -v {host_dir}:/srv/http:ro python:3.10-slim \
+             python -m http.server 8080 --directory /srv/http'",
+            host_dir = host_dir,
+            port = http_cfg.port
+        );
+        ssh.execute_command(&start_cmd, true, true).await
+            .map_err(|e| anyhow::anyhow!("Failed to start HTTP server on head node: {}", e))?;
+
+        let head_ip = head.get_ip()?;
+        info!("Artifacts published to head HTTP server directory: {}", releases_dir);
+        info!("HTTP server base URL: http://{}:{}", head_ip, http_cfg.port);
         Ok(())
     }
 
@@ -233,6 +324,16 @@ CMD ["sh"]
 
         use base64::{engine::general_purpose, Engine as _};
         use serde_json::json;
+        // Resolve head http server
+        let head = cluster_config
+            .nodes
+            .iter()
+            .find(|n| matches!(n.role, crate::config::cluster_config::NodeRole::Head))
+            .ok_or_else(|| anyhow::anyhow!("Head node not found in cluster"))?;
+        let head_ip = head.get_ip()?;
+        let http_cfg = &cluster_config.task_spec.monitoring.httpserver;
+        let http_base = format!("http://{}:{}/releases/nokube", head_ip, http_cfg.port);
+
         for node in &cluster_config.nodes {
             // 使用完整的SSH URL作为查找键
             let ssh_key = &node.ssh_url;
@@ -255,45 +356,38 @@ CMD ["sh"]
                 ssh_manager.execute_command(&create_storage_cmd, true, true).await
                     .map_err(|e| anyhow::anyhow!("Failed to create storage path {} on node {}: {}", storage_path, node.name, e))?;
                 
-                // 上传Docker镜像tar包
-                info!("Uploading Docker image to node: {}", node.name);
+                // Download artifacts from head HTTP server
+                // 1) Download Docker image tar and load
                 let remote_image_path = format!("{}/nokube-image.tar", workspace);
-                ssh_manager
-                    .upload_file("./tmp/nokube-image.tar", &remote_image_path)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("Failed to upload Docker image to node {}: {}", node.name, e))?;
+                let dl_image_cmd = format!(
+                    "sh -lc 'set -e; (curl -fsSL {base}/nokube-image.tar -o {img} || wget -qO {img} {base}/nokube-image.tar); sudo docker load -i {img}'",
+                    base = http_base,
+                    img = remote_image_path
+                );
+                info!("Downloading and loading Docker image on node: {}", node.name);
+                ssh_manager.execute_command(&dl_image_cmd, true, true).await
+                    .map_err(|e| anyhow::anyhow!("Failed to download/load Docker image on node {}: {}", node.name, e))?;
 
-                // 加载Docker镜像
-                info!("Loading Docker image on node: {}", node.name);
-                let load_image_cmd = format!("sudo docker load -i {}", remote_image_path);
-                ssh_manager.execute_command(&load_image_cmd, true, true).await
-                    .map_err(|e| anyhow::anyhow!("Failed to load Docker image on node {}: {}", node.name, e))?;
-
-                // 验证镜像已加载
-                info!("Verifying Docker image on node: {}", node.name);
-                ssh_manager.execute_command("sudo docker images | grep nokube", true, true).await
-                    .map_err(|e| anyhow::anyhow!("Failed to verify Docker image on node {}: {}", node.name, e))?;
-
-                // 上传 remote_lib 目录（保留兼容性）
-                let local_staging_dir = "./tmp/nokube-remote-lib";
-                ssh_manager
-                    .upload_directory(local_staging_dir, &remote_lib_path, true)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("Failed to upload remote lib to node {}: {}", node.name, e))?;
-                
-                // 强制更新 nokube 二进制文件（确保使用最新版本）
+                // 2) Download nokube binary and optional libs to remote_lib
                 let nokube_binary_path = format!("{}/nokube", remote_lib_path);
-                info!("Force updating nokube binary on node: {}", node.name);
-                ssh_manager
-                    .force_upload_file("target/nokube", &nokube_binary_path)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("Failed to force upload nokube binary to node {}: {}", node.name, e))?;
-                
-                // 验证上传的二进制文件
-                info!("Verifying uploaded binary on node: {}", node.name);
-                let verify_cmd = format!("ls -la {}/nokube", remote_lib_path);
-                ssh_manager.execute_command(&verify_cmd, true, true).await
-                    .map_err(|e| anyhow::anyhow!("Failed to verify binary on node {}: {}", node.name, e))?;
+                let dl_bin_cmd = format!(
+                    "sh -lc 'set -e; mkdir -p {rlib}; (curl -fsSL {base}/bin/nokube -o {bin} || wget -qO {bin} {base}/bin/nokube); chmod +x {bin}'",
+                    rlib = remote_lib_path,
+                    base = http_base,
+                    bin = nokube_binary_path
+                );
+                info!("Downloading nokube binary on node: {}", node.name);
+                ssh_manager.execute_command(&dl_bin_cmd, true, true).await
+                    .map_err(|e| anyhow::anyhow!("Failed to download nokube binary on node {}: {}", node.name, e))?;
+
+                // Optional libs
+                let dl_libs_cmd = format!(
+                    "sh -lc '(curl -fsSL {base}/lib/libcrypto.so.1.1 -o {rlib}/libcrypto.so.1.1 || wget -qO {rlib}/libcrypto.so.1.1 {base}/lib/libcrypto.so.1.1 || true); \
+                               (curl -fsSL {base}/lib/libssl.so.1.1 -o {rlib}/libssl.so.1.1 || wget -qO {rlib}/lib/libssl.so.1.1 {base}/lib/libssl.so.1.1 || true)'",
+                    base = http_base,
+                    rlib = remote_lib_path
+                );
+                let _ = ssh_manager.execute_command(&dl_libs_cmd, true, true).await;
 
                 // 获取目标用户信息
                 let target_user = node.users.first()
@@ -473,6 +567,10 @@ isDefault = true
                     name: "greptimedb",
                     url: greptimedb_url,
                 });
+
+                // HTTP server link (served from workspace subdir)
+                let http_url = format!("http://{}:{}", host, cluster_config.task_spec.monitoring.httpserver.port);
+                rows.push(ServiceRow { name: "httpserver", url: http_url });
 
                 info!("Bound services (Grafana, GreptimeDB) are managed by node agents");
             }
