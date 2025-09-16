@@ -1,0 +1,43 @@
+# Base image build for nokube using layered dependency builder
+# This produces an optimized base image tag (classic): nokube:base
+# Final assembly will add the rust binary and retag as: nokube:latest
+
+image_name: nokube
+image_tag: base
+
+base_image: ubuntu:22.04
+
+# Keep root for system tools; container entry is handled by runner
+user: root
+sudo: false
+
+# Inherit useful env (esp. proxies) for apt/pip during build
+inherit_env: true
+inherit_proxy: true
+inherit_locale: false
+inherit_timezone: true
+inherit_custom_env: []
+exclude_env: []
+
+heavy_setup:
+  # System packages similar to the original Dockerfile
+  apt_packages:
+    - docker.io
+    - ca-certificates
+    - curl
+    - wget
+    - net-tools
+    - htop
+    - iotop
+    - python3
+    - python3-pip
+  # Python tooling needed at runtime by scripts
+  pip_packages:
+    - requests
+    - psutil
+    - docker
+
+# Optional: add APT sources customization if needed
+# apt_sources:
+#   - "deb http://archive.ubuntu.com/ubuntu/ jammy main restricted universe multiverse"
+

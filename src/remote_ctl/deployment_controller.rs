@@ -219,82 +219,112 @@ impl DeploymentController {
     }
 
     async fn build_nokube_docker_image(&self) -> Result<()> {
-        info!("Building Docker-enabled nokube image");
+        use std::path::Path;
 
-        // 创建临时Dockerfile目录
-        let dockerfile_dir = "./tmp/nokube-docker-build";
-        std::fs::create_dir_all(dockerfile_dir)
-            .map_err(|e| anyhow::anyhow!("Failed to create Dockerfile directory: {}", e))?;
+        // Resolve build configuration path (prefer project configs over 3rd_party)
+        let config_env = std::env::var("NOKUBE_IMAGE_CONFIG").ok();
+        let mut tried: Vec<String> = Vec::new();
+        let cfg_path_env = if let Some(p) = config_env {
+            tried.push(format!("env:NOKUBE_IMAGE_CONFIG={}", p));
+            if Path::new(&p).exists() { Some(p) } else { None }
+        } else { None };
 
-        // 创建Dockerfile内容
-        let dockerfile_content = r#"FROM ubuntu:22.04
+        let config_path = if let Some(p) = cfg_path_env {
+            p
+        } else {
+            let candidates = vec![
+                "configs/images/nokube_base.yaml",
+                "./configs/images/nokube_base.yaml",
+            ];
+            let mut found = None;
+            for c in candidates {
+                tried.push(c.to_string());
+                if Path::new(c).exists() { found = Some(c.to_string()); break; }
+            }
+            found.ok_or_else(|| anyhow::anyhow!(
+                "Build configuration not found. Tried: {}",
+                tried.join(", ")
+            ))?
+        };
+        // Use 3rd_party orchestrator (upgraded to snapshot mode internally)
+        info!("Building nokube image via dependency_img_build orchestrator, config={}", config_path);
+        let cli_path = "3rd_party/dependency_img_build/cli.py";
+        if !Path::new(cli_path).exists() {
+            anyhow::bail!("Build orchestrator CLI not found at {}", cli_path);
+        }
+        std::fs::create_dir_all("./tmp")
+            .map_err(|e| anyhow::anyhow!("Failed to create ./tmp: {}", e))?;
+        let status = std::process::Command::new("python3")
+            .args(&[cli_path, "build", "-c", &config_path])
+            .stdout(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::inherit())
+            .status()
+            .map_err(|e| anyhow::anyhow!("Failed to execute orchestrator: {}", e))?;
+        if !status.success() {
+            let code = status.code().unwrap_or(-1);
+            anyhow::bail!("Image build orchestrator exited with code {} (config={}).", code, config_path);
+        }
+        info!("Base image built via orchestrator (tag: nokube:base)");
 
-# 设置非交互模式和时区
-ENV DEBIAN_FRONTEND=noninteractive
-ENV TZ=UTC
+        // Assemble final image by injecting the compiled binary without writing a Dockerfile
+        // 1) create a temp container from base image
+        let container_name = "nokube-image-assembler";
+        // Best-effort cleanup of any stale container
+        let _ = std::process::Command::new("sudo")
+            .args(&["docker", "rm", "-f", container_name])
+            .output();
 
-# 更新软件包并安装Docker和其他必要工具
-RUN apt-get update && apt-get install -y \
-    docker.io \
-    ca-certificates \
-    curl \
-    wget \
-    net-tools \
-    htop \
-    iotop \
-    python3 \
-    python3-pip \
-    && pip3 install requests psutil docker \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
-
-# 复制nokube二进制和SSL库
-COPY target/nokube /usr/local/bin/nokube
-COPY target/lib*.so.1.1 /usr/local/lib/
-
-# 设置权限和环境变量
-RUN chmod +x /usr/local/bin/nokube
-ENV LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
-ENV PATH=/usr/local/bin:$PATH
-
-# 设置工作目录
-WORKDIR /root
-
-# 默认命令
-CMD ["sh"]
-"#;
-
-        let dockerfile_path = format!("{}/Dockerfile", dockerfile_dir);
-        std::fs::write(&dockerfile_path, dockerfile_content)
-            .map_err(|e| anyhow::anyhow!("Failed to write Dockerfile: {}", e))?;
-
-        // 构建Docker镜像
-        info!("Building nokube Docker image...");
-        let build_result = std::process::Command::new("sudo")
-            .args(&[
-                "docker", "build",
-                "-t", "nokube:latest",
-                "-f", &dockerfile_path,
-                "."
-            ])
+        let create_out = std::process::Command::new("sudo")
+            .args(&["docker", "create", "--name", container_name, "nokube:base", "sleep", "infinity"])
             .output()
-            .map_err(|e| anyhow::anyhow!("Failed to execute docker build: {}", e))?;
-
-        if !build_result.status.success() {
-            let error_msg = String::from_utf8_lossy(&build_result.stderr);
-            return Err(anyhow::anyhow!("Docker build failed: {}", error_msg));
+            .map_err(|e| anyhow::anyhow!("Failed to create temp container from nokube:base: {}", e))?;
+        if !create_out.status.success() {
+            let stderr = String::from_utf8_lossy(&create_out.stderr);
+            anyhow::bail!("Failed to create temp container: {}", stderr);
         }
 
-        info!("Docker image built successfully");
+        // 2) copy binary (required for container entry)
+        let bin_src = Path::new("target/nokube");
+        if !bin_src.exists() {
+            // Clean up the temp container before bailing
+            let _ = std::process::Command::new("sudo").args(&["docker", "rm", "-f", container_name]).output();
+            anyhow::bail!("Binary not found at {} — ensure 'target/nokube' is built", bin_src.display());
+        }
+        let cp_out = std::process::Command::new("sudo")
+            .args(&["docker", "cp", bin_src.to_str().unwrap(), &format!("{}:/usr/local/bin/nokube", container_name)])
+            .output()
+            .map_err(|e| anyhow::anyhow!("Failed to docker cp binary: {}", e))?;
+        if !cp_out.status.success() {
+            let stderr = String::from_utf8_lossy(&cp_out.stderr);
+            // Attempt cleanup
+            let _ = std::process::Command::new("sudo").args(&["docker", "rm", "-f", container_name]).output();
+            anyhow::bail!("Failed to copy binary into container: {}", stderr);
+        }
+        // Note: docker cp preserves executable bit from host. Cargo builds binaries with +x by default,
+        // so we avoid needing to exec inside the container (which would require it running).
 
-        // 导出Docker镜像为tar包
+        // 3) commit as nokube:latest
+        let commit_out = std::process::Command::new("sudo")
+            .args(&["docker", "commit", container_name, "nokube:latest"])
+            .output()
+            .map_err(|e| anyhow::anyhow!("Failed to commit container to nokube:latest: {}", e))?;
+        if !commit_out.status.success() {
+            let stderr = String::from_utf8_lossy(&commit_out.stderr);
+            let _ = std::process::Command::new("sudo").args(&["docker", "rm", "-f", container_name]).output();
+            anyhow::bail!("Failed to commit final image: {}", stderr);
+        }
+
+        // Remove temp container
+        let _ = std::process::Command::new("sudo")
+            .args(&["docker", "rm", "-f", container_name])
+            .output();
+
+        info!("Final image assembled and tagged: nokube:latest");
+
+        // Export image tar (same as before)
         info!("Exporting Docker image to tar file...");
         let export_result = std::process::Command::new("sudo")
-            .args(&[
-                "docker", "save",
-                "-o", "./tmp/nokube-image.tar",
-                "nokube:latest"
-            ])
+            .args(&["docker", "save", "-o", "./tmp/nokube-image.tar", "nokube:latest"])
             .output()
             .map_err(|e| anyhow::anyhow!("Failed to execute docker save: {}", e))?;
 
@@ -303,19 +333,94 @@ CMD ["sh"]
             return Err(anyhow::anyhow!("Docker export failed: {}", error_msg));
         }
 
-        // 修复tar文件权限 - 获取当前用户
+        // chown tar to current user for convenience
         let current_user = std::env::var("USER").unwrap_or_else(|_| "pa".to_string());
         let chown_result = std::process::Command::new("sudo")
             .args(&["chown", &format!("{}:{}", current_user, current_user), "./tmp/nokube-image.tar"])
             .output()
             .map_err(|e| anyhow::anyhow!("Failed to execute chown: {}", e))?;
-
         if !chown_result.status.success() {
             let error_msg = String::from_utf8_lossy(&chown_result.stderr);
             return Err(anyhow::anyhow!("Failed to change tar file ownership: {}", error_msg));
         }
 
         info!("Docker image exported to ./tmp/nokube-image.tar");
+        Ok(())
+    }
+
+    /// Snapshot-mode image build: avoid `docker build`, use `docker run` + `commit` with full logs.
+    async fn build_nokube_image_snapshot(&self, config_path: &str) -> Result<()> {
+        #[derive(serde::Deserialize)]
+        struct HeavySetup { apt_packages: Option<Vec<String>>, pip_packages: Option<Vec<String>> }
+        #[derive(serde::Deserialize)]
+        struct SnapshotCfg { base_image: String, heavy_setup: Option<HeavySetup> }
+
+        let cfg_str = std::fs::read_to_string(config_path)
+            .map_err(|e| anyhow::anyhow!("Failed to read {}: {}", config_path, e))?;
+        let cfg: SnapshotCfg = serde_yaml::from_str(&cfg_str)
+            .map_err(|e| anyhow::anyhow!("Failed to parse {}: {}", config_path, e))?;
+
+        let base = cfg.base_image;
+        let apt = cfg.heavy_setup.as_ref().and_then(|h| h.apt_packages.clone()).unwrap_or_default();
+        let pip = cfg.heavy_setup.as_ref().and_then(|h| h.pip_packages.clone()).unwrap_or_default();
+
+        let builder = "nokube-snap-builder";
+
+        fn run(cmd: &mut std::process::Command, desc: &str) -> anyhow::Result<()> {
+            let out = cmd.output().map_err(|e| anyhow::anyhow!("{} exec failed: {}", desc, e))?;
+            if !out.status.success() {
+                let s = String::from_utf8_lossy(&out.stderr);
+                let o = String::from_utf8_lossy(&out.stdout);
+                return Err(anyhow::anyhow!("{} failed (code {:?}):\nSTDOUT:\n{}\nSTDERR:\n{}", desc, out.status.code(), o, s));
+            }
+            Ok(())
+        }
+
+        // Best-effort cleanup
+        let _ = std::process::Command::new("sudo").args(["docker","rm","-f",builder]).output();
+        info!("Snapshot: pulling base image {}", base);
+        run(std::process::Command::new("sudo").args(["docker","pull",&base]), "docker pull")?;
+
+        // Start long-running container with proxy env forwarded
+        let mut run_args: Vec<String> = vec![
+            "docker".into(), "run".into(), "-d".into(), "--name".into(), builder.into()
+        ];
+        for key in ["http_proxy","https_proxy","no_proxy","HTTP_PROXY","HTTPS_PROXY","NO_PROXY"] {
+            if let Ok(val) = std::env::var(key) {
+                if !val.is_empty() {
+                    run_args.push("-e".into());
+                    run_args.push(format!("{}={}", key, val));
+                }
+            }
+        }
+        run_args.push(base.clone());
+        run_args.push("sleep".into());
+        run_args.push("infinity".into());
+        info!("Snapshot: starting builder container from {}", base);
+        run(std::process::Command::new("sudo").args(&run_args), "docker run builder")?;
+
+        // APT install
+        if !apt.is_empty() {
+            let apt_cmd = format!("bash -lc 'apt-get update -y && DEBIAN_FRONTEND=noninteractive apt-get install -y {}'", apt.join(" "));
+            info!("Snapshot: apt install {}", apt.join(","));
+            run(std::process::Command::new("sudo").args(["docker","exec",builder,"sh","-lc",&apt_cmd]), "docker exec apt install")?;
+            info!("Snapshot: apt install completed");
+        }
+
+        // PIP install
+        if !pip.is_empty() {
+            let pip_cmd = format!("bash -lc 'python3 -m pip install -U pip && pip3 install {}'", pip.join(" "));
+            info!("Snapshot: pip install {}", pip.join(","));
+            run(std::process::Command::new("sudo").args(["docker","exec",builder,"sh","-lc",&pip_cmd]), "docker exec pip install")?;
+            info!("Snapshot: pip install completed");
+        }
+
+        // Commit as base
+        info!("Snapshot: committing builder container to image nokube:base");
+        run(std::process::Command::new("sudo").args(["docker","commit",builder,"nokube:base"]), "docker commit")?;
+
+        // Cleanup builder
+        let _ = std::process::Command::new("sudo").args(["docker","rm","-f",builder]).output();
         Ok(())
     }
 
@@ -360,7 +465,7 @@ CMD ["sh"]
                 // 1) Download Docker image tar and load
                 let remote_image_path = format!("{}/nokube-image.tar", workspace);
                 let dl_image_cmd = format!(
-                    "sh -lc 'set -e; (curl -fsSL {base}/nokube-image.tar -o {img} || wget -qO {img} {base}/nokube-image.tar); sudo docker load -i {img}'",
+                    "sh -lc 'set -e; (curl --noproxy \"*\" -fsSL {base}/nokube-image.tar -o {img} || wget --no-proxy -qO {img} {base}/nokube-image.tar); sudo docker load -i {img}'",
                     base = http_base,
                     img = remote_image_path
                 );
@@ -371,7 +476,7 @@ CMD ["sh"]
                 // 2) Download nokube binary and optional libs to remote_lib
                 let nokube_binary_path = format!("{}/nokube", remote_lib_path);
                 let dl_bin_cmd = format!(
-                    "sh -lc 'set -e; mkdir -p {rlib}; (curl -fsSL {base}/bin/nokube -o {bin} || wget -qO {bin} {base}/bin/nokube); chmod +x {bin}'",
+                    "sh -lc 'set -e; mkdir -p {rlib}; (curl --noproxy \"*\" -fsSL {base}/bin/nokube -o {bin} || wget --no-proxy -qO {bin} {base}/bin/nokube); chmod +x {bin}'",
                     rlib = remote_lib_path,
                     base = http_base,
                     bin = nokube_binary_path

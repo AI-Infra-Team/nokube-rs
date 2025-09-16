@@ -3,6 +3,7 @@ use anyhow::Result;
 use etcd_rs::{
     Client, ClientConfig, DeleteRequest, Endpoint, KeyRange, KeyValueOp, PutRequest, RangeRequest,
 };
+use etcd_rs::LeaseOp; // bring trait into scope for grant_lease()
 use serde_json;
 use tokio::time::{interval, Duration};
 
@@ -174,6 +175,15 @@ impl EtcdManager {
         self.client.put(req).await?;
         Ok(())
     }
+
+    /// 带租约的 PUT（使用 etcd lease 以便键自动过期）
+    pub async fn put_with_lease(&self, key: String, value: String, lease_id: i64) -> Result<()> {
+        let mut req = PutRequest::new(key, value);
+        // etcd-rs 提供 KeyValueOp::lease 接口
+        req = req.lease(lease_id);
+        self.client.put(req).await?;
+        Ok(())
+    }
     
     /// 通用的etcd GET操作
     pub async fn get(&self, key: String) -> Result<Vec<etcd_rs::KeyValue>> {
@@ -203,5 +213,12 @@ impl EtcdManager {
         let req = DeleteRequest::new(key);
         self.client.delete(req).await?;
         Ok(())
+    }
+
+    /// 申请一个租约（秒）并返回租约ID
+    pub async fn grant_lease(&self, ttl_secs: i64) -> Result<i64> {
+        let ttl = std::time::Duration::from_secs(ttl_secs as u64);
+        let resp = self.client.grant_lease(ttl).await?;
+        Ok(resp.id)
     }
 }

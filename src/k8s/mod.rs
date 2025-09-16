@@ -75,3 +75,11 @@ pub enum ComponentStatus {
     Stopped,
     Failed,
 }
+
+/// Actor 监督接口：统一“子随父灭”和“孤儿回收”逻辑
+#[async_trait::async_trait]
+pub trait ActorSupervise: Send + Sync {
+    /// 定期调用：由 ServiceAgent/KubeController 调度
+    /// 实现需检查父/上级是否存在（etcd key 或 alive 租约），若不存在应自清理（停止容器并清理 etcd pod/events）
+    async fn supervise_parent(&self) -> Result<()>;
+}

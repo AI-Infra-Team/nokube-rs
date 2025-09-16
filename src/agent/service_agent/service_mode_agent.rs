@@ -42,7 +42,14 @@ impl ServiceModeAgent {
         );
         
         // 初始化KubeController时传入TheProxy的发送端
-        let workspace = format!("/opt/devcon/pa/nokube-workspace");
+        // 使用集群配置中的当前节点 workspace，避免硬编码路径导致挂载校验失败
+        let workspace = config
+            .nodes
+            .iter()
+            .find(|n| n.name == node_id)
+            .and_then(|n| n.workspace.clone())
+            .unwrap_or_else(|| "/opt/devcon/pa/nokube-workspace".to_string());
+        let _ = std::fs::create_dir_all(&workspace);
         let mut kube_controller = KubeController::new(workspace);
         kube_controller.proxy_tx = the_proxy.get_alive_sender();
         
@@ -157,6 +164,13 @@ impl ServiceModeAgent {
             info!("KubeController started successfully");
         }
         
+        // 启动时先进行一次本地容器与etcd状态的对账：
+        // - 清理不在etcd中的 nokube-pod-* 容器
+        // - 如容器带有校验标签且与 etcd 不一致，先回收，后续将按新配置重建
+        if let Err(e) = self.startup_container_reconcile().await {
+            warn!("Startup container reconcile failed: {}", e);
+        }
+
         // 从etcd加载k8s对象并应用到KubeController
         self.load_and_apply_k8s_objects().await?;
         
@@ -170,8 +184,6 @@ impl ServiceModeAgent {
         
         // 启动k8s对象监控协程
         self.start_k8s_object_monitor().await?;
-        // 启动孤儿容器回收器
-        self.start_orphan_reaper().await?;
         
         // 持续运行，等待关闭信号
         self.process_manager.wait_for_shutdown_signal().await;
@@ -187,6 +199,86 @@ impl ServiceModeAgent {
         }
         
         info!("Service mode agent shutdown completed");
+        Ok(())
+    }
+
+    /// 启动阶段的本地容器与etcd状态对账（Deployment）
+    async fn startup_container_reconcile(&self) -> Result<()> {
+        if let Some(etcd_manager) = &self.etcd_manager {
+            use std::collections::{HashMap, HashSet};
+
+            // 1) 读取 etcd 中期望的 deployments 以及其 checksum
+            let mut desired: HashMap<String, u64> = HashMap::new(); // deployName -> checksum
+            let deployment_prefix = format!("/nokube/{}/deployments/", self.cluster_name);
+            match etcd_manager.get_prefix(deployment_prefix).await {
+                Ok(kvs) => {
+                    for kv in kvs {
+                        let key = kv.key_str().to_string();
+                        if let Some(name) = key.split('/').last() {
+                            let val = String::from_utf8_lossy(&kv.value);
+                            desired.insert(name.to_string(), Self::calc_hash_u64(&val));
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!("Reconcile: failed to load deployments from etcd: {}", e);
+                }
+            }
+
+            // 2) 列出本机容器
+            let runtime = crate::agent::general::DockerRunner::get_runtime_path()
+                .unwrap_or_else(|_| "docker".to_string());
+            let output = std::process::Command::new(&runtime)
+                .args(["ps", "--format", "{{.Names}}"])
+                .output();
+            match output {
+                Ok(out) if out.status.success() => {
+                    let names = String::from_utf8_lossy(&out.stdout);
+                    let mut to_remove: HashSet<String> = HashSet::new();
+                    for name in names.lines() {
+                        if let Some(stripped) = name.strip_prefix("nokube-pod-") {
+                            // 只处理 deployment 命名；daemonset 在统一逻辑下由后续重建
+                            let deploy_name = stripped;
+                            if !desired.contains_key(deploy_name) {
+                                // 不在etcd中，标记删除
+                                to_remove.insert(name.to_string());
+                                continue;
+                            }
+                            // 读取容器标签中的 checksum
+                            let fmt = "{{ index .Config.Labels \"nokube.actor.checksum\" }}";
+                            let inspect = std::process::Command::new(&runtime)
+                                .args(["inspect", "--format", fmt, name])
+                                .output();
+                            if let Ok(ins) = inspect {
+                                if ins.status.success() {
+                                    let tag_val = String::from_utf8_lossy(&ins.stdout).trim().to_string();
+                                    if let Ok(cur) = tag_val.parse::<u64>() {
+                                        if let Some(exp) = desired.get(deploy_name) {
+                                            if &cur != exp { to_remove.insert(name.to_string()); }
+                                        }
+                                    } else {
+                                        // 无标签或格式异常，保守回收
+                                        to_remove.insert(name.to_string());
+                                    }
+                                } else {
+                                    to_remove.insert(name.to_string());
+                                }
+                            }
+                        }
+                    }
+                    // 执行删除
+                    for n in to_remove {
+                        info!("Startup reconcile: removing stale container '{}'", n);
+                        let _ = crate::agent::general::DockerRunner::stop(&n);
+                        let _ = crate::agent::general::DockerRunner::remove_container(&n);
+                    }
+                }
+                Ok(out) => {
+                    warn!("Reconcile: list containers failed (code={:?})", out.status.code());
+                }
+                Err(e) => warn!("Reconcile: error listing containers: {}", e),
+            }
+        }
         Ok(())
     }
 
@@ -415,257 +507,208 @@ class NoKubeMetricsCollector:
         }}
     
     def collect_k8s_object_metrics(self):
-        """收集k8s对象指标"""
+        """收集k8s对象指标（仅依据实际运行中的容器）"""
         metrics = []
         timestamp = int(time.time())
-        
-        # 模拟k8s对象信息收集（实际应该从etcd读取）
-        k8s_objects = [
-            {{'namespace': 'default', 'object_type': 'daemonset', 'object_name': 'nokube-agent', 'status': 'Running', 'parent_object': ''}},
-            {{'namespace': 'default', 'object_type': 'deployment', 'object_name': 'gitops-controller', 'status': 'Running', 'parent_object': ''}},
-            {{'namespace': 'default', 'object_type': 'pod', 'object_name': 'nokube-agent-1', 'status': 'Running', 'parent_object': 'nokube-agent'}},
-            {{'namespace': 'default', 'object_type': 'pod', 'object_name': 'gitops-controller-1', 'status': 'Running', 'parent_object': 'gitops-controller'}},
-            {{'namespace': 'kube-system', 'object_type': 'pod', 'object_name': 'etcd-master', 'status': 'Running', 'parent_object': 'etcd-daemonset'}},
-        ]
-        
-        for obj in k8s_objects:
-            # k8s对象信息指标
+
+        # 读取实际运行的 nokube actor 容器
+        running = []  # (name, status)
+        try:
+            result = subprocess.run(['docker', 'ps', '--format', 'table {{{{.Names}}}}\\t{{{{.Status}}}}'],
+                                    capture_output=True, text=True, timeout=5)
+            if result.returncode == 0:
+                for line in result.stdout.split('\\n')[1:]:  # 跳过标题行
+                    if not line.strip():
+                        continue
+                    parts = line.split('\\t')
+                    if len(parts) < 2:
+                        continue
+                    name, status = parts[0], parts[1]
+                    if name.startswith('nokube-pod-'):
+                        running.append((name, status))
+        except Exception:
+            pass
+
+        # 为每个容器推送对象信息和Pod状态
+        for name, status in running:
+            # 判断对象类型（deployment 或 daemonset）
+            actor_name = name[len('nokube-pod-'):]
+            is_daemonset = actor_name.endswith('-' + self.node_id)
+            parent_type = 'daemonset' if is_daemonset else 'deployment'
+            parent_name = actor_name[:-(len(self.node_id) + 1)] if is_daemonset else actor_name
+            obj_status = 'Running' if 'Up' in status else 'Unknown'
+
+            # k8s 对象信息（按pod记录）
             metrics.append({{
                 'metric_name': 'nokube_k8s_object_info',
                 'timestamp': timestamp,
                 'value': 1,
                 'labels': {{
-                    'namespace': obj['namespace'],
-                    'object_type': obj['object_type'],
-                    'object_name': obj['object_name'],
-                    'status': obj['status'],
-                    'parent_object': obj['parent_object'],
-                    'node_id': self.node_id,
-                    'cluster_name': self.cluster_name
-                }}
-            }})
-            
-            # Pod状态指标（特别处理pod与daemonset关系）
-            if obj['object_type'] == 'pod' and obj['parent_object']:
-                pod_status_value = 1 if obj['status'] == 'Running' else 0
-                metrics.append({{
-                    'metric_name': 'nokube_k8s_pod_status',
-                    'timestamp': timestamp,
-                    'value': pod_status_value,
-                    'labels': {{
-                        'namespace': obj['namespace'],
-                        'pod_name': obj['object_name'],
-                        'parent_daemonset': obj['parent_object'] if 'daemonset' in obj['parent_object'] else '',
-                        'parent_deployment': obj['parent_object'] if 'deployment' in obj['parent_object'] else '',
-                        'status': obj['status'],
-                        'node_id': self.node_id,
-                        'cluster_name': self.cluster_name
-                    }}
-                }})
-        
-        # 收集容器资源使用情况
-        try:
-            containers = []
-            # 尝试获取docker容器信息
-            result = subprocess.run(['docker', 'ps', '--format', 'table {{{{.Names}}}}\\t{{{{.Status}}}}'], 
-                                  capture_output=True, text=True, timeout=5)
-            if result.returncode == 0:
-                for line in result.stdout.split('\\n')[1:]:  # 跳过标题行
-                    if line.strip():
-                        parts = line.split('\\t')
-                        if len(parts) >= 2:
-                            container_name = parts[0]
-                            if 'nokube' in container_name or 'gitops' in container_name:
-                                containers.append(container_name)
-        except:
-            pass
-        
-        # 为每个容器添加资源指标
-        for container in containers:
-            try:
-                # 模拟容器资源使用（实际应该从docker stats获取）
-                import random
-                cpu_usage = random.uniform(5, 95)
-                memory_usage = random.uniform(10, 80)
-                
-                metrics.append({{
-                    'metric_name': 'nokube_container_cpu_usage',
-                    'timestamp': timestamp,
-                    'value': cpu_usage,
-                    'labels': {{
-                        'container_name': container,
-                        'namespace': 'default',
-                        'object_type': 'container',
-                        'node_id': self.node_id,
-                        'cluster_name': self.cluster_name
-                    }}
-                }})
-                
-                metrics.append({{
-                    'metric_name': 'nokube_container_memory_usage',
-                    'timestamp': timestamp,
-                    'value': memory_usage,
-                    'labels': {{
-                        'container_name': container,
-                        'namespace': 'default',
-                        'object_type': 'container',
-                        'node_id': self.node_id,
-                        'cluster_name': self.cluster_name
-                    }}
-                }})
-            except:
-                pass
-        
-        # k8s事件指标
-        event_types = ['Created', 'Started', 'Pulled', 'Scheduled']
-        for event_type in event_types:
-            metrics.append({{
-                'metric_name': 'nokube_k8s_events_total',
-                'timestamp': timestamp,
-                'value': 1,  # 计数器，实际应该累计
-                'labels': {{
-                    'event_type': event_type,
-                    'object_name': 'gitops-controller',
-                    'object_type': 'deployment',
                     'namespace': 'default',
+                    'object_type': 'pod',
+                    'object_name': actor_name,
+                    'status': obj_status,
+                    'parent_object': parent_type + '/' + parent_name,
                     'node_id': self.node_id,
-                    'cluster_name': self.cluster_name
+                    'cluster_name': self.cluster_name,
                 }}
             }})
-        
+
+            # Pod状态（1=Running, 0=非Running）
+            metrics.append({{
+                'metric_name': 'nokube_k8s_pod_status',
+                'timestamp': timestamp,
+                'value': 1 if 'Up' in status else 0,
+                'labels': {{
+                    'namespace': 'default',
+                    'pod_name': actor_name,
+                    'parent_daemonset': (parent_type + '/' + parent_name) if parent_type == 'daemonset' else '',
+                    'parent_deployment': (parent_type + '/' + parent_name) if parent_type == 'deployment' else '',
+                    'status': obj_status,
+                    'node_id': self.node_id,
+                    'cluster_name': self.cluster_name,
+                }}
+            }})
+
+        # 实际容器资源指标由 collect_actor_metrics 收集（docker stats）
         return metrics
     
     def collect_actor_metrics(self):
-        """收集actor指标（deployment/daemonset/pod/config）"""
+        """收集actor与容器资源指标（基于 docker stats 与容器命名约定）"""
         metrics = []
         timestamp = int(time.time())
-        
-        # 模拟actor状态信息
-        actors = [
-            {{
-                'actor_type': 'deployment',
-                'actor_name': 'gitops-controller',
-                'namespace': 'default',
-                'status': 'Running',
-                'replicas': 2,
-                'ready_replicas': 2
-            }},
-            {{
-                'actor_type': 'daemonset',
-                'actor_name': 'nokube-agent',
-                'namespace': 'kube-system',
-                'status': 'Running',
-                'desired_nodes': 3,
-                'ready_nodes': 3
-            }},
-            {{
-                'actor_type': 'pod',
-                'actor_name': 'gitops-controller-1',
-                'namespace': 'default',
-                'status': 'Running',
-                'cpu_usage': 15.5,
-                'memory_usage': 45.2
-            }},
-            {{
-                'actor_type': 'pod',
-                'actor_name': 'nokube-agent-node1',
-                'namespace': 'kube-system',
-                'status': 'Running',
-                'cpu_usage': 8.3,
-                'memory_usage': 32.1
-            }},
-            {{
-                'actor_type': 'configmap',
-                'actor_name': 'gitops-config',
-                'namespace': 'default',
-                'status': 'Active',
-                'data_keys': 5
-            }},
-            {{
-                'actor_type': 'secret',
-                'actor_name': 'gitops-secret',
-                'namespace': 'default',
-                'status': 'Active',
-                'data_keys': 3
-            }}
-        ]
-        
-        for actor in actors:
-            # Actor状态指标
-            status_value = 1 if actor['status'] in ['Running', 'Active'] else 0
-            metrics.append({{
-                'metric_name': 'nokube_actor_status',
-                'timestamp': timestamp,
-                'value': status_value,
-                'labels': {{
-                    'actor_type': actor['actor_type'],
-                    'actor_name': actor['actor_name'],
-                    'namespace': actor['namespace'],
-                    'status': actor['status'],
-                    'cluster_name': self.cluster_name,
-                    'node_id': self.node_id,
-                    # 添加特定类型的标签
-                    'replicas': str(actor.get('replicas', '')),
-                    'ready_replicas': str(actor.get('ready_replicas', '')),
-                    'desired_nodes': str(actor.get('desired_nodes', '')),
-                    'ready_nodes': str(actor.get('ready_nodes', '')),
-                    'data_keys': str(actor.get('data_keys', ''))
-                }}
-            }})
-            
-            # Pod资源使用指标
-            if actor['actor_type'] == 'pod':
-                if 'cpu_usage' in actor:
+
+        # 获取所有容器的实时资源（一次性读取避免多次开销）
+        stats = {{}}
+        try:
+            out = subprocess.run(
+                ['docker', 'stats', '--no-stream', '--format', '{{{{.Name}}}}\t{{{{.CPUPerc}}}}\t{{{{.MemUsage}}}}\t{{{{.MemPerc}}}}'],
+                capture_output=True, text=True, timeout=8)
+            if out.returncode == 0:
+                for line in out.stdout.split('\n'):
+                    if not line.strip():
+                        continue
+                    parts = line.split('\t')
+                    if len(parts) < 4:
+                        continue
+                    stats[parts[0]] = {{
+                        'cpu': parts[1],  # e.g. '0.15%'
+                        'mem_usage': parts[2],  # e.g. '68.8MiB / 7.68GiB'
+                        'mem_pct': parts[3],  # e.g. '0.88%'
+                    }}
+        except Exception:
+            pass
+
+        def parse_bytes(s):
+            try:
+                val = s.strip().split(' ')[0]  # '68.8MiB'
+                num = float(''.join([c for c in val if c.isdigit() or c=='.']))
+                unit = ''.join([c for c in val if c.isalpha()])
+                mul = 1.0
+                if unit.lower() in ['b']:
+                    mul = 1
+                elif unit.lower() in ['kb', 'kib']:
+                    mul = 1024
+                elif unit.lower() in ['mb', 'mib']:
+                    mul = 1024**2
+                elif unit.lower() in ['gb', 'gib']:
+                    mul = 1024**3
+                elif unit.lower() in ['tb', 'tib']:
+                    mul = 1024**4
+                return int(num * mul)
+            except Exception:
+                return 0
+
+        # 遍历当前运行中的 actor 容器
+        try:
+            ps = subprocess.run(['docker', 'ps', '--format', '{{{{.Names}}}}\t{{{{.Status}}}}'],
+                                 capture_output=True, text=True, timeout=5)
+            if ps.returncode == 0:
+                for line in ps.stdout.split('\n'):
+                    if not line.strip():
+                        continue
+                    name_status = line.split('\t')
+                    if len(name_status) < 2:
+                        continue
+                    name, status = name_status[0], name_status[1]
+                    if not name.startswith('nokube-pod-'):
+                        continue
+                    actor_name = name[len('nokube-pod-'):]
+                    is_daemonset = actor_name.endswith('-' + self.node_id)
+                    actor_type = 'daemonset' if is_daemonset else 'deployment'
+                    # Actor状态（容器Up即Running）
                     metrics.append({{
-                        'metric_name': 'nokube_actor_cpu_usage',
+                        'metric_name': 'nokube_actor_status',
                         'timestamp': timestamp,
-                        'value': actor['cpu_usage'],
+                        'value': 1 if 'Up' in status else 0,
                         'labels': {{
-                            'actor_type': actor['actor_type'],
-                            'actor_name': actor['actor_name'],
-                            'namespace': actor['namespace'],
+                            'actor_type': actor_type,
+                            'actor_name': actor_name if not is_daemonset else actor_name[:-(len(self.node_id)+1)],
+                            'namespace': 'default',
+                            'status': 'Running' if 'Up' in status else 'Unknown',
                             'cluster_name': self.cluster_name,
-                            'node_id': self.node_id
+                            'node_id': self.node_id,
                         }}
                     }})
-                
-                if 'memory_usage' in actor:
-                    metrics.append({{
-                        'metric_name': 'nokube_actor_memory_usage',
-                        'timestamp': timestamp,
-                        'value': actor['memory_usage'],
-                        'labels': {{
-                            'actor_type': actor['actor_type'],
-                            'actor_name': actor['actor_name'],
-                            'namespace': actor['namespace'],
-                            'cluster_name': self.cluster_name,
-                            'node_id': self.node_id
-                        }}
-                    }})
-        
-        # Actor事件指标
-        actor_events = [
-            {{'event_type': 'ScalingUp', 'actor_name': 'gitops-controller', 'actor_type': 'deployment'}},
-            {{'event_type': 'Scheduled', 'actor_name': 'gitops-controller-1', 'actor_type': 'pod'}},
-            {{'event_type': 'Created', 'actor_name': 'gitops-config', 'actor_type': 'configmap'}},
-            {{'event_type': 'Updated', 'actor_name': 'gitops-secret', 'actor_type': 'secret'}}
-        ]
-        
-        for event in actor_events:
-            metrics.append({{
-                'metric_name': 'nokube_actor_events_total',
-                'timestamp': timestamp,
-                'value': 1,
-                'labels': {{
-                    'event_type': event['event_type'],
-                    'actor_name': event['actor_name'],
-                    'actor_type': event['actor_type'],
-                    'namespace': 'default',
-                    'cluster_name': self.cluster_name,
-                    'node_id': self.node_id
-                }}
-            }})
-        
+
+                    # 容器资源（CPU 百分比；内存字节数）
+                    st = stats.get(name)
+                    if st:
+                        try:
+                            cpu = float(st['cpu'].strip().rstrip('%'))
+                        except Exception:
+                            cpu = 0.0
+                        mem_bytes = 0
+                        try:
+                            mem_usage = st['mem_usage'].split('/')[0]
+                            mem_bytes = parse_bytes(mem_usage)
+                        except Exception:
+                            pass
+
+                        metrics.append({{
+                            'metric_name': 'nokube_container_cpu_usage',
+                            'timestamp': timestamp,
+                            'value': cpu,
+                            'labels': {{
+                                'container_name': name,
+                                'namespace': 'default',
+                                'object_type': 'container',
+                                'node_id': self.node_id,
+                                'cluster_name': self.cluster_name,
+                            }}
+                        }})
+                        metrics.append({{
+                            'metric_name': 'nokube_container_memory_usage',
+                            'timestamp': timestamp,
+                            'value': mem_bytes,
+                            'labels': {{
+                                'container_name': name,
+                                'namespace': 'default',
+                                'object_type': 'container',
+                                'node_id': self.node_id,
+                                'cluster_name': self.cluster_name,
+                            }}
+                        }})
+                        # 同时上报内存百分比（用于百分比面板）
+                        try:
+                            mem_pct = float(st.get('mem_pct','0').strip().rstrip('%'))
+                        except Exception:
+                            mem_pct = 0.0
+                        metrics.append({{
+                            'metric_name': 'nokube_container_mem_percent',
+                            'timestamp': timestamp,
+                            'value': mem_pct,
+                            'labels': {{
+                                'container_name': name,
+                                'namespace': 'default',
+                                'object_type': 'container',
+                                'node_id': self.node_id,
+                                'cluster_name': self.cluster_name,
+                            }}
+                        }})
+        except Exception:
+            pass
+
         return metrics
     
     def to_influx_lines(self, metrics):
@@ -692,7 +735,8 @@ class NoKubeMetricsCollector:
                 line2 = 'nokube_container_cpu,' + tags + ' value=' + str(value) + ' ' + str(ts)
                 lines.append(line2)
             if name == 'nokube_container_memory_usage':
-                line2 = 'nokube_container_mem_percent,' + tags + ' value=' + str(value) + ' ' + str(ts)
+                # also emit bytes-aliased series for clarity
+                line2 = 'nokube_container_mem_bytes,' + tags + ' value=' + str(value) + ' ' + str(ts)
                 lines.append(line2)
         return "\n".join(lines)
     
@@ -736,7 +780,7 @@ class NoKubeMetricsCollector:
                     self.push_influx(all_metrics)
                 
                 sys.stdout.flush()
-                time.sleep(30)
+                time.sleep(15)
                 
             except Exception as e:
                 print(f"Error collecting metrics: {{{{e}}}}", file=sys.stderr)
@@ -889,11 +933,21 @@ if __name__ == "__main__":
         info!("Creating deployment (using unified method): {}", deployment_name);
         
         // 直接使用统一的容器创建方法
+        let workspace = self
+            .config
+            .nodes
+            .iter()
+            .find(|n| n.name == self.node_id)
+            .and_then(|n| n.workspace.clone())
+            .unwrap_or_else(|| "/opt/devcon/pa/nokube-workspace".to_string());
+        let _ = std::fs::create_dir_all(&workspace);
+
         match Self::create_deployment_container_unified(
             &deployment_yaml,
             deployment_name,
             &self.cluster_name,
-            self.etcd_manager.as_ref().unwrap()
+            self.etcd_manager.as_ref().unwrap(),
+            &workspace
         ).await {
             Ok(_) => {
                 info!("Successfully created deployment container: {}", deployment_name);
@@ -964,7 +1018,14 @@ if __name__ == "__main__":
                 };
                 
                 let attribution_path = GlobalAttributionPath::new(format!("daemonset/{}", daemonset_name));
-                let workspace = format!("/opt/devcon/pa/nokube-workspace");
+                let workspace = self
+                    .config
+                    .nodes
+                    .iter()
+                    .find(|n| n.name == self.node_id)
+                    .and_then(|n| n.workspace.clone())
+                    .unwrap_or_else(|| "/opt/devcon/pa/nokube-workspace".to_string());
+                let _ = std::fs::create_dir_all(&workspace);
                 
                 if let Some(ref kube_controller) = self.kube_controller {
                     let proxy_tx = kube_controller.proxy_tx.clone();
@@ -1158,9 +1219,10 @@ if __name__ == "__main__":
             };
 
             tokio::spawn(async move {
+                use std::collections::HashMap;
                 let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
-                let mut seen_deploy_keys: HashSet<String> = HashSet::new();
-                let mut seen_daemon_keys: HashSet<String> = HashSet::new();
+                let mut seen_deploy_checksums: HashMap<String, u64> = HashMap::new();
+                let mut seen_daemon_checksums: HashMap<String, u64> = HashMap::new();
 
                 loop {
                     interval.tick().await;
@@ -1170,71 +1232,112 @@ if __name__ == "__main__":
                     let deployment_prefix = format!("/nokube/{}/deployments/", cluster_name);
                     match etcd_manager_clone.get_prefix(deployment_prefix.clone()).await {
                         Ok(deployment_kvs) => {
-                            info!("Deployment monitor: total keys={} (seen={})", deployment_kvs.len(), seen_deploy_keys.len());
-                            // 收集当前存在的 deployment keys
-                            let mut current_keys: HashSet<String> = HashSet::new();
+                            info!("Deployment monitor: total keys={} (seen={})", deployment_kvs.len(), seen_deploy_checksums.len());
+                            // 收集当前存在的 deployment 及其校验和
+                            let mut current_map: HashMap<String, u64> = HashMap::new();
                             for kv in &deployment_kvs {
-                                current_keys.insert(String::from_utf8_lossy(&kv.key).to_string());
+                                let key = String::from_utf8_lossy(&kv.key).to_string();
+                                let val = String::from_utf8_lossy(&kv.value);
+                                let csum = Self::calc_hash_u64(&val);
+                                current_map.insert(key, csum);
                             }
 
                             // 处理新增的 deployments
                             for kv in deployment_kvs {
                                 let key_str = String::from_utf8_lossy(&kv.key).to_string();
-                                if !seen_deploy_keys.contains(&key_str) {
+                                let value_str = String::from_utf8_lossy(&kv.value);
+                                let checksum = Self::calc_hash_u64(&value_str);
+                                if !seen_deploy_checksums.contains_key(&key_str) {
                                     let deployment_name = key_str.split('/').last().unwrap_or("unknown");
-                                    let value_str = String::from_utf8_lossy(&kv.value);
                                     match serde_yaml::from_str::<serde_yaml::Value>(&value_str) {
                                         Ok(deployment_yaml) => {
                                             info!("Processing new deployment: {} (key={})", deployment_name, key_str);
+                                            // 计算当前节点的工作目录以挂载（避免校验失败）
+                                            let workspace = if let Ok(cfg_mgr) = ConfigManager::new().await {
+                                                if let Ok(Some(cfg)) = cfg_mgr.get_cluster_config(&cluster_name).await {
+                                                    // 优先使用 Head 节点 workspace，其次用第一个节点 workspace，最后回退默认路径
+                                                    if let Some(head) = cfg.nodes.iter().find(|n| matches!(n.role, crate::config::cluster_config::NodeRole::Head)) {
+                                                        head.workspace.clone().unwrap_or_else(|| "/opt/devcon/pa/nokube-workspace".to_string())
+                                                    } else {
+                                                        cfg.nodes
+                                                            .first()
+                                                            .and_then(|n| n.workspace.clone())
+                                                            .unwrap_or_else(|| "/opt/devcon/pa/nokube-workspace".to_string())
+                                                    }
+                                                } else { "/opt/devcon/pa/nokube-workspace".to_string() }
+                                            } else { "/opt/devcon/pa/nokube-workspace".to_string() };
+                                            let _ = std::fs::create_dir_all(&workspace);
+
                                             if let Err(e) = Self::create_deployment_container_unified(
                                                 &deployment_yaml,
                                                 deployment_name,
                                                 &cluster_name,
                                                 &etcd_manager_clone,
+                                                &workspace,
                                             ).await {
                                                 error!("Failed to create deployment {}: {}", deployment_name, e);
                                             } else {
-                                                seen_deploy_keys.insert(key_str);
+                                                seen_deploy_checksums.insert(key_str, checksum);
                                             }
                                         }
                                         Err(e) => {
                                             error!("Failed to parse deployment YAML for {}: {}", deployment_name, e);
                                         }
                                     }
+                                } else {
+                                    // 已存在：检查校验和是否变化
+                                    if let Some(prev) = seen_deploy_checksums.get(&key_str) {
+                                        if *prev != checksum {
+                                            let deployment_name = key_str.split('/').last().unwrap_or("unknown");
+                                            info!("🔁 Detected deployment update: {} (key={}), restarting", deployment_name, key_str);
+                                            let container_name = format!("nokube-pod-{}", deployment_name);
+                                            // 停旧容器
+                                            if let Err(e) = crate::agent::general::DockerRunner::stop(&container_name) {
+                                                tracing::warn!("Failed to stop container {}: {}", container_name, e);
+                                            }
+                                            if let Err(e) = crate::agent::general::DockerRunner::remove_container(&container_name) {
+                                                tracing::warn!("Failed to remove container {}: {}", container_name, e);
+                                            }
+                                            // 重建
+                                            match serde_yaml::from_str::<serde_yaml::Value>(&value_str) {
+                                                Ok(deployment_yaml) => {
+                                                    // 计算当前节点的工作目录
+                                                    let workspace = if let Ok(cfg_mgr) = ConfigManager::new().await {
+                                                        if let Ok(Some(cfg)) = cfg_mgr.get_cluster_config(&cluster_name).await {
+                                                            if let Some(head) = cfg.nodes.iter().find(|n| matches!(n.role, crate::config::cluster_config::NodeRole::Head)) {
+                                                                head.workspace.clone().unwrap_or_else(|| "/opt/devcon/pa/nokube-workspace".to_string())
+                                                            } else {
+                                                                cfg.nodes.first().and_then(|n| n.workspace.clone()).unwrap_or_else(|| "/opt/devcon/pa/nokube-workspace".to_string())
+                                                            }
+                                                        } else { "/opt/devcon/pa/nokube-workspace".to_string() }
+                                                    } else { "/opt/devcon/pa/nokube-workspace".to_string() };
+                                                    let _ = std::fs::create_dir_all(&workspace);
+                                                    if let Err(e) = Self::create_deployment_container_unified(
+                                                        &deployment_yaml,
+                                                        deployment_name,
+                                                        &cluster_name,
+                                                        &etcd_manager_clone,
+                                                        &workspace,
+                                                    ).await {
+                                                        error!("Failed to recreate deployment {}: {}", deployment_name, e);
+                                                    } else {
+                                                        seen_deploy_checksums.insert(key_str.clone(), checksum);
+                                                    }
+                                                }
+                                                Err(e) => {
+                                                    error!("Failed to parse updated deployment YAML for {}: {}", deployment_name, e);
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
                             }
 
-                            // 处理已删除的 deployments：清理对应容器与状态
-                            let removed: Vec<String> = seen_deploy_keys
-                                .difference(&current_keys)
-                                .cloned()
-                                .collect();
-                            for key in &removed {
-                                if let Some(deployment_name) = key.split('/').last() {
-                                    let container_name = format!("nokube-pod-{}", deployment_name);
-                                    info!("🧹 Detected removed deployment '{}', stopping container '{}'", deployment_name, container_name);
-                                    // 停止并删除容器（忽略错误，尽力而为）
-                                    if let Err(e) = crate::agent::general::DockerRunner::stop(&container_name) {
-                                        tracing::warn!("Failed to stop container {}: {}", container_name, e);
-                                    }
-                                    if let Err(e) = crate::agent::general::DockerRunner::remove_container(&container_name) {
-                                        tracing::warn!("Failed to remove container {}: {}", container_name, e);
-                                    }
+                            // 处理已删除的 deployments：不再由监控器直接清理容器，
+                            // 统一由子 Actor 的 supervise_parent() 自清理，保持简单一致。
 
-                                    // 清理etcd中的 pod 和 events 信息
-                                    let pod_key = format!("/nokube/{}/pods/{}", cluster_name, deployment_name);
-                                    if let Err(e) = etcd_manager_clone.delete(pod_key.clone()).await {
-                                        tracing::warn!("Failed to delete pod key {}: {}", pod_key, e);
-                                    }
-                                    let events_key = format!("/nokube/{}/events/pod/{}", cluster_name, deployment_name);
-                                    if let Err(e) = etcd_manager_clone.delete(events_key.clone()).await {
-                                        tracing::warn!("Failed to delete events key {}: {}", events_key, e);
-                                    }
-                                }
-                            }
-
-                            // 用当前 keys 覆盖已见集合，保持与etcd一致
-                            seen_deploy_keys = current_keys;
+                            // 用当前 map 覆盖已见集合，保持与etcd一致
+                            seen_deploy_checksums = current_map;
                         }
                         Err(e) => {
                             warn!("Failed to check deployments: {}", e);
@@ -1245,23 +1348,48 @@ if __name__ == "__main__":
                     let daemonset_prefix = format!("/nokube/{}/daemonsets/", cluster_name);
                     match etcd_manager_clone.get_prefix(daemonset_prefix).await {
                         Ok(daemonset_kvs) => {
-                            info!("DaemonSet monitor: total keys={} (seen={})", daemonset_kvs.len(), seen_daemon_keys.len());
+                            info!("DaemonSet monitor: total keys={} (seen={})", daemonset_kvs.len(), seen_daemon_checksums.len());
+                            // 构建当前 map
+                            let mut current_map: HashMap<String, u64> = HashMap::new();
+                            for kv in &daemonset_kvs {
+                                let key = String::from_utf8_lossy(&kv.key).to_string();
+                                let val = String::from_utf8_lossy(&kv.value);
+                                current_map.insert(key, Self::calc_hash_u64(&val));
+                            }
                             for kv in daemonset_kvs {
                                 let key_str = String::from_utf8_lossy(&kv.key).to_string();
-                                if !seen_daemon_keys.contains(&key_str) {
+                                let val = String::from_utf8_lossy(&kv.value);
+                                let checksum = Self::calc_hash_u64(&val);
+                                if !seen_daemon_checksums.contains_key(&key_str) {
                                     let daemonset_name = key_str.split('/').last().unwrap_or("unknown");
-                                    let value_str = String::from_utf8_lossy(&kv.value);
-                                    match serde_yaml::from_str::<serde_yaml::Value>(&value_str) {
+                                    match serde_yaml::from_str::<serde_yaml::Value>(&val) {
                                         Ok(daemonset_yaml) => {
                                             info!("Processing new daemonset: {} (key={})", daemonset_name, key_str);
-                                            // 后续可添加统一创建逻辑
-                                            seen_daemon_keys.insert(key_str);
+                                            // 后续可添加统一创建逻辑（目前仅记录校验和）
+                                            seen_daemon_checksums.insert(key_str, checksum);
                                         }
                                         Err(e) => {
                                             error!("Failed to parse daemonset YAML for {}: {}", daemonset_name, e);
                                         }
                                     }
+                                } else {
+                                    // update 检测占位（若需要同部署一样重启）
+                                    if let Some(prev) = seen_daemon_checksums.get(&key_str) {
+                                        if *prev != checksum {
+                                            let daemonset_name = key_str.split('/').last().unwrap_or("unknown");
+                                            info!("🔁 Detected daemonset update: {} (key={}), will recreate local ds container", daemonset_name, key_str);
+                                            let ds_container_name = format!("nokube-pod-{}-{}", daemonset_name, "${NODE}");
+                                            // 由于当前节点名不可用于此处（闭包内），仅更新校验和，实际容器重建在 create_daemonset_from_yaml 中处理
+                                            seen_daemon_checksums.insert(key_str.clone(), checksum);
+                                        }
+                                    }
                                 }
+                            }
+                            // 移除检测
+                            let removed: Vec<String> = seen_daemon_checksums
+                                .keys().filter(|k| !current_map.contains_key(*k)).cloned().collect();
+                            for key in removed {
+                                seen_daemon_checksums.remove(&key);
                             }
                         }
                         Err(e) => {
@@ -1274,62 +1402,16 @@ if __name__ == "__main__":
         Ok(())
     }
 
-    /// 启动孤儿容器回收协程：清理没有对应etcd key的 nokube-pod-* 容器
-    async fn start_orphan_reaper(&mut self) -> Result<()> {
-        if let Some(etcd_manager) = &self.etcd_manager {
-            let etcd_manager = Arc::clone(etcd_manager);
-            let cluster_name = self.cluster_name.clone();
-            tokio::spawn(async move {
-                let mut ticker = tokio::time::interval(tokio::time::Duration::from_secs(60));
-                loop {
-                    ticker.tick().await;
-                    // 列出本机容器名称
-                    let runtime_path = DockerRunner::get_runtime_path().unwrap_or_else(|_| "docker".to_string());
-                    match std::process::Command::new(&runtime_path)
-                        .args(["ps", "--format", "{{.Names}}"])
-                        .output() {
-                        Ok(output) if output.status.success() => {
-                            let names = String::from_utf8_lossy(&output.stdout);
-                            for name in names.lines() {
-                                if let Some(stripped) = name.strip_prefix("nokube-pod-") {
-                                    // 检查是否存在对应的etcd deployment key
-                                    let dep_key = format!("/nokube/{}/deployments/{}", cluster_name, stripped);
-                                    let pod_key = format!("/nokube/{}/pods/{}", cluster_name, stripped);
-                                    let mut is_orphan = false;
-                                    if let Ok(kvs) = etcd_manager.get(dep_key.clone()).await {
-                                        if kvs.is_empty() { is_orphan = true; }
-                                    } else {
-                                        is_orphan = true;
-                                    }
-
-                                    if is_orphan {
-                                        info!("🧹 Orphan reaper: stopping orphan container '{}' (no etcd key)", name);
-                                        if let Err(e) = DockerRunner::stop(name) {
-                                            warn!("Orphan reaper: failed to stop {}: {}", name, e);
-                                        }
-                                        if let Err(e) = DockerRunner::remove_container(name) {
-                                            warn!("Orphan reaper: failed to remove {}: {}", name, e);
-                                        }
-                                        // 清理相关 etcd pod/events
-                                        let _ = etcd_manager.delete(pod_key.clone()).await;
-                                        let events_key = format!("/nokube/{}/events/pod/{}", cluster_name, stripped);
-                                        let _ = etcd_manager.delete(events_key).await;
-                                    }
-                                }
-                            }
-                        }
-                        Ok(output) => {
-                            warn!("Orphan reaper: failed to list containers (code={:?})", output.status.code());
-                        }
-                        Err(e) => {
-                            warn!("Orphan reaper: error executing runtime list: {}", e);
-                        }
-                    }
-                }
-            });
-        }
-        Ok(())
+    /// 计算简单的稳定哈希（用于 YAML 变更检测）
+    fn calc_hash_u64(s: &str) -> u64 {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut hasher = DefaultHasher::new();
+        s.hash(&mut hasher);
+        hasher.finish()
     }
+
+    
     
     /// 统一的deployment容器创建方法 - 使用最新的DockerRunner
     async fn create_deployment_container_unified(
@@ -1337,6 +1419,7 @@ if __name__ == "__main__":
         deployment_name: &str,
         cluster_name: &str,
         etcd_manager: &Arc<EtcdManager>,
+        workspace: &str,
     ) -> Result<()> {
         info!("Creating deployment container (unified): {}", deployment_name);
         
@@ -1423,7 +1506,7 @@ if __name__ == "__main__":
         
         // 创建Docker容器使用新的DockerRunner
         let container_name = format!("nokube-pod-{}", deployment_name);
-        let workspace = format!("/opt/devcon/pa/nokube-workspace");
+        let workspace = workspace.to_string();
         
         // 使用新的 DockerRunConfig 构建配置
         let mut config = DockerRunConfig::new(container_name.clone(), image.to_string());
@@ -1656,7 +1739,44 @@ if __name__ == "__main__":
                 Self::store_pod_status_static(etcd_manager, cluster_name, deployment_name, "Failed", Some(&format!("{}", e))).await?;
             }
         }
-        
+
+        // 附加容器标签：记录当前 YAML 校验和，便于启动对账和后续检测
+        let yaml_text = serde_yaml::to_string(deployment_yaml).unwrap_or_default();
+        let checksum = Self::calc_hash_u64(&yaml_text);
+        config.extra_args.push("--label".to_string());
+        config.extra_args.push(format!("nokube.actor.checksum={}", checksum));
+
+        // 启动一个细粒度的自清理任务：当 etcd 中对应 deployment key 被删除时，自动回收本容器
+        {
+            let etcd = Arc::clone(etcd_manager);
+            let dname = deployment_name.to_string();
+            let cname = container_name.clone();
+            let c = cluster_name.to_string();
+            tokio::spawn(async move {
+                let mut ticker = tokio::time::interval(tokio::time::Duration::from_secs(15));
+                loop {
+                    ticker.tick().await;
+                    let key = format!("/nokube/{}/deployments/{}", c, dname);
+                    match etcd.get(key.clone()).await {
+                        Ok(kvs) if kvs.is_empty() => {
+                            tracing::info!("Actor self-clean: deployment '{}' missing; stopping container '{}'", dname, cname);
+                            let _ = crate::agent::general::DockerRunner::stop(&cname);
+                            let _ = crate::agent::general::DockerRunner::remove_container(&cname);
+                            let pod_key = format!("/nokube/{}/pods/{}", c, dname);
+                            let _ = etcd.delete(pod_key).await;
+                            let events_key = format!("/nokube/{}/events/pod/{}", c, dname);
+                            let _ = etcd.delete(events_key).await;
+                            break;
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            tracing::warn!("Actor self-clean: etcd get failed for {}: {}", key, e);
+                        }
+                    }
+                }
+            });
+        }
+
         Ok(())
     }
     /// 静态方法：存储pod状态到etcd

@@ -1,0 +1,3 @@
+[submodule "3rd_party/dependency_img_build"]
+	path = 3rd_party/dependency_img_build
+	url = https://github.com/AI-Infra-Team/dependency_img_build

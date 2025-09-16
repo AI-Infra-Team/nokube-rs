@@ -152,7 +152,10 @@ impl Exporter {
             let text = String::from_utf8_lossy(&out.stdout);
             return text
                 .lines()
-                .filter(|n| n.starts_with("nokube-pod-"))
+                .map(|s| s.trim())
+                .filter(|n| !n.is_empty())
+                // 支持 actor 容器（nokube-pod-*）以及平台内置服务容器（nokube-*, 如 grafana/greptimedb/httpserver），以及含 gitops 的容器
+                .filter(|n| n.starts_with("nokube-pod-") || n.starts_with("nokube-") || n.contains("gitops"))
                 .map(|s| s.to_string())
                 .collect();
         }
@@ -385,6 +388,24 @@ impl Exporter {
         influxdb_metrics.push_str(&format!("nokube_memory_total_bytes{} value={} {}\n", sys_tags, metrics.memory_total_bytes, ts));
         influxdb_metrics.push_str(&format!("nokube_network_rx_bytes{} value={} {}\n", sys_tags, metrics.network_rx_bytes, ts));
         influxdb_metrics.push_str(&format!("nokube_network_tx_bytes{} value={} {}\n", sys_tags, metrics.network_tx_bytes, ts));
+
+        // 计算节点内存派生量（与容器同步采样时间戳对齐）
+        let sum_container_mem_bytes: u64 = container_metrics.iter().map(|(_, (_cpu, mem_bytes, _pct))| *mem_bytes).sum();
+        let other_used_bytes = metrics
+            .memory_used_bytes
+            .saturating_sub(sum_container_mem_bytes);
+        let free_bytes = metrics
+            .memory_total_bytes
+            .saturating_sub(metrics.memory_used_bytes);
+
+        influxdb_metrics.push_str(&format!(
+            "nokube_node_mem_other_bytes{} value={} {}\n",
+            sys_tags, other_used_bytes, ts
+        ));
+        influxdb_metrics.push_str(&format!(
+            "nokube_node_mem_free_bytes{} value={} {}\n",
+            sys_tags, free_bytes, ts
+        ));
 
         // 追加容器级别指标
         for (name, (cpu_pct, mem_bytes, mem_pct)) in container_metrics {

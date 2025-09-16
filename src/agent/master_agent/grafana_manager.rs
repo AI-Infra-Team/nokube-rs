@@ -411,7 +411,28 @@ isDefault = true
     }
 
     async fn import_cluster_dashboard(&self) -> Result<()> {
-        // Create a default dashboard with panels for CPU, memory, and network metrics
+        // Create a default dashboard with panels for memory (containers), CPU, and network metrics
+        // To ensure layout updates take effect, delete any existing dashboard with same UID first
+        self.wait_for_grafana_api().await?;
+        let client_pre = reqwest::Client::new();
+        let uid = "nokube-cluster-monitoring";
+        let get_url = format!("http://localhost:{}/api/dashboards/uid/{}", self.port, uid);
+        if let Ok(resp) = client_pre
+            .get(&get_url)
+            .basic_auth("admin", Some("admin"))
+            .send()
+            .await
+        {
+            if resp.status().is_success() {
+                let del_url = format!("http://localhost:{}/api/dashboards/uid/{}", self.port, uid);
+                let _ = client_pre
+                    .delete(&del_url)
+                    .basic_auth("admin", Some("admin"))
+                    .send()
+                    .await;
+                info!("Deleted existing cluster dashboard (UID={}) before re-import", uid);
+            }
+        }
         let links_md = format!(
             "### 关键服务\n\n- [Actor Dashboard](/d/nokube-actor-dashboard)\n- [Logs (MySQL)](/d/nokube-logs-mysql)\n- [Greptime Metrics]({}/v1/prometheus)\n",
             self.greptimedb_endpoint
@@ -424,43 +445,27 @@ isDefault = true
                 "title": "NoKube Cluster Monitoring",
                 "tags": ["nokube", "cluster"],
                 "timezone": "browser",
+                "templating": {
+                    "list": [
+                        {
+                            "name": "node",
+                            "type": "query",
+                            "label": "Node",
+                            "datasource": "GreptimeDB",
+                            "query": "label_values(nokube_cpu_usage, node)",
+                            "refresh": 1,
+                            "includeAll": false,
+                            "multi": true,
+                            "current": {"text": "", "value": []}
+                        }
+                    ]
+                },
                 "links": [
                     {"type": "link", "title": "Actor Dashboard", "url": "/d/nokube-actor-dashboard", "targetBlank": true},
                     {"type": "link", "title": "Logs (MySQL)", "url": "/d/nokube-logs-mysql", "targetBlank": true},
                     {"type": "link", "title": "Greptime Metrics", "url": format!("{}/v1/prometheus", self.greptimedb_endpoint), "targetBlank": true}
                 ],
                 "panels": [
-                    {
-                        "id": 1,
-                        "title": "Cluster Memory Usage (%)",
-                        "type": "graph",
-                        "datasource": "GreptimeDB",
-                        "targets": [
-                            {"expr": "nokube_memory_usage", "legendFormat": "{{instance}}", "intervalFactor": 1, "step": 30}
-                        ],
-                        "yAxes": [
-                            {
-                                "label": "Percent",
-                                "max": 100,
-                                "min": 0
-                            },
-                            {
-                                "show": false
-                            }
-                        ],
-                        "lines": true,
-                        "fill": 1,
-                        "linewidth": 2,
-                        "pointradius": 2,
-                        "points": false,
-                        "renderer": "flot",
-                        "seriesOverrides": [],
-                        "spaceLength": 10,
-                        "stack": false,
-                        "steppedLine": false,
-                        "nullPointMode": "null as zero",
-                        "gridPos": {"h": 9, "w": 8, "x": 8, "y": 0}
-                    },
                     {
                         "id": 10,
                         "title": "关键链接",
@@ -474,18 +479,18 @@ isDefault = true
                         "type": "graph",
                         "datasource": "GreptimeDB",
                         "targets": [
-                            {"expr": "sum by (container) (nokube_container_mem_bytes)", "legendFormat": "{{container}}", "intervalFactor": 1, "step": 30},
-                            {"expr": "sum(nokube_memory_used_bytes)", "legendFormat": "Cluster Used", "intervalFactor": 1, "step": 30},
-                            {"expr": "sum(nokube_memory_total_bytes)", "legendFormat": "Cluster Total", "intervalFactor": 1, "step": 30}
+                            {"expr": "sum by (container) (last_over_time(nokube_container_mem_bytes[60s]))", "legendFormat": "{{container}}", "intervalFactor": 1, "step": 30},
+                            {"expr": "sum(last_over_time(nokube_node_mem_other_bytes[60s]))", "legendFormat": "Other Used", "intervalFactor": 1, "step": 30},
+                            {"expr": "sum(last_over_time(nokube_node_mem_free_bytes[60s]))", "legendFormat": "Free", "intervalFactor": 1, "step": 30}
                         ],
                         "yAxes": [{"label": "Bytes", "min": 0}, {"show": false}],
-                        "lines": true, "fill": 2, "linewidth": 2, "pointradius": 2, "points": false, "renderer": "flot",
+                        "lines": true, "fill": 4, "linewidth": 2, "pointradius": 2, "points": false, "renderer": "flot",
                         "seriesOverrides": [
-                            {"alias": "Cluster Used", "stack": false, "lines": true, "fill": 0, "linewidth": 2},
-                            {"alias": "Cluster Total", "stack": false, "lines": true, "fill": 0, "linewidth": 1}
+                            {"alias": "Other Used", "color": "#F2495C"},
+                            {"alias": "Free", "color": "#5794F2"}
                         ],
                         "spaceLength": 10, "stack": true, "steppedLine": false, "nullPointMode": "null as zero",
-                        "gridPos": {"h": 9, "w": 8, "x": 16, "y": 0}
+                        "gridPos": {"h": 9, "w": 8, "x": 8, "y": 0}
                     },
                     {
                         "id": 3,
@@ -509,7 +514,7 @@ isDefault = true
                             }
                         ],
                         "lines": true,
-                        "fill": 2,
+                        "fill": 4,
                         "linewidth": 2,
                         "pointradius": 2,
                         "points": false,
@@ -564,40 +569,52 @@ isDefault = true
                             {"expr": "sum by (container) (nokube_container_cpu)", "legendFormat": "{{container}}", "intervalFactor": 1, "step": 30}
                         ],
                         "yAxes": [{"label": "Percent", "max": 100, "min": 0}, {"show": false}],
-                        "lines": true, "fill": 1, "linewidth": 2, "pointradius": 2, "points": false, "renderer": "flot",
+                        "lines": true, "fill": 4, "linewidth": 2, "pointradius": 2, "points": false, "renderer": "flot",
                         "seriesOverrides": [], "spaceLength": 10, "stack": true, "steppedLine": false, "nullPointMode": "null as zero",
                         "gridPos": {"h": 9, "w": 8, "x": 16, "y": 0}
                     },
-                    
+                    // Per-node repeated panels: CPU and Memory by container
                     {
-                        "id": 7,
-                        "title": "Node Memory Used vs Total (bytes)",
+                        "id": 6,
+                        "title": "Node CPU (%) by Container [$node]",
                         "type": "graph",
                         "datasource": "GreptimeDB",
                         "targets": [
-                            {"expr": "nokube_memory_total_bytes", "legendFormat": "Total {{instance}}", "intervalFactor": 1, "step": 30},
-                            {"expr": "nokube_memory_used_bytes", "legendFormat": "Used {{instance}}", "intervalFactor": 1, "step": 30}
+                            {"expr": "nokube_container_cpu{node=~\"$node\"}", "legendFormat": "{{container}}", "intervalFactor": 1, "step": 30}
+                        ],
+                        "yAxes": [{"label": "Percent", "max": 100, "min": 0}, {"show": false}],
+                        "lines": true, "fill": 1, "linewidth": 2, "pointradius": 2, "points": false, "renderer": "flot",
+                        "seriesOverrides": [], "spaceLength": 10, "stack": true, "steppedLine": false, "nullPointMode": "null as zero",
+                        "gridPos": {"h": 9, "w": 12, "x": 0, "y": 18},
+                        "repeat": "node",
+                        "repeatDirection": "h"
+                    },
+                    {
+                        "id": 7,
+                        "title": "Node Memory (bytes) by Container [$node]",
+                        "type": "graph",
+                        "datasource": "GreptimeDB",
+                        "targets": [
+                            {"expr": "last_over_time(nokube_container_mem_bytes{node=~\"$node\"}[60s])", "legendFormat": "{{container}}", "intervalFactor": 1, "step": 30},
+                            {"expr": "last_over_time(nokube_node_mem_other_bytes{node=~\"$node\"}[60s])", "legendFormat": "Other Used", "intervalFactor": 1, "step": 30},
+                            {"expr": "last_over_time(nokube_node_mem_free_bytes{node=~\"$node\"}[60s])", "legendFormat": "Free", "intervalFactor": 1, "step": 30}
                         ],
                         "yAxes": [{"label": "Bytes", "min": 0}, {"show": false}],
-                        "lines": true,
-                        "fill": 0,
-                        "linewidth": 2,
-                        "pointradius": 2,
-                        "points": false,
-                        "renderer": "flot",
-                        "seriesOverrides": [],
-                        "spaceLength": 10,
-                        "stack": false,
-                        "steppedLine": false,
-                        "nullPointMode": "null as zero",
-                        "gridPos": {"h": 9, "w": 24, "x": 0, "y": 27}
+                        "lines": true, "fill": 2, "linewidth": 2, "pointradius": 2, "points": false, "renderer": "flot",
+                        "seriesOverrides": [
+                            {"alias": "Other Used", "color": "#F2495C"},
+                            {"alias": "Free", "color": "#5794F2"}
+                        ], "spaceLength": 10, "stack": true, "steppedLine": false, "nullPointMode": "null as zero",
+                        "gridPos": {"h": 9, "w": 12, "x": 12, "y": 18},
+                        "repeat": "node",
+                        "repeatDirection": "h"
                     }
                 ],
                 "time": {
                     "from": "now-1h",
                     "to": "now"
                 },
-                "refresh": "30s",
+                "refresh": "15s",
                 "schemaVersion": 16,
                 "version": 0
             },

@@ -1,6 +1,7 @@
 // k8s对象实现 - DaemonSet, Deployment, Pod等计算型对象
 use crate::k8s::{AsyncTaskObject, GlobalAttributionPath, K8sObjectType, ComponentStatus};
 use crate::k8s::the_proxy::{ActorAliveRequest};
+use crate::k8s::ActorSupervise;
 use crate::config::config_manager::ConfigManager;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -1014,6 +1015,52 @@ impl PodObject {
         tracing::info!("Expected container name: {}", container_name);
         tracing::info!("Container {} logs will be collected by ServiceModeAgent LogCollector", container_name);
         
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl ActorSupervise for PodObject {
+    async fn supervise_parent(&self) -> anyhow::Result<()> {
+        // 解析父路径，形如 "deployment/<name>"
+        let parent = self.attribution_path.parent();
+        if let Some(p) = parent {
+            let parts: Vec<&str> = p.path.split('/').collect();
+            if parts.len() >= 2 {
+                let actor_type = parts[0];
+                let actor_name = parts[1];
+                let etcd = self.config_manager.get_etcd_manager();
+                // 根据父类型检查 etcd 是否存在
+                let key = match actor_type {
+                    "deployment" => format!("/nokube/{}/deployments/{}", self.cluster_name, actor_name),
+                    "daemonset" => format!("/nokube/{}/daemonsets/{}", self.cluster_name, actor_name),
+                    _ => String::new(),
+                };
+                if !key.is_empty() {
+                    match etcd.get(key.clone()).await {
+                        Ok(kvs) if kvs.is_empty() => {
+                            // 父不存在：自清理
+                            let container_name = format!("nokube-pod-{}", self.name);
+                            tracing::info!(
+                                "Actor supervise: parent missing for pod '{}'(parent={} {}), stopping container '{}'",
+                                self.name, actor_type, actor_name, container_name
+                            );
+                            let _ = crate::agent::general::DockerRunner::stop(&container_name);
+                            let _ = crate::agent::general::DockerRunner::remove_container(&container_name);
+                            // 清理 etcd pod/events
+                            let pod_key = format!("/nokube/{}/pods/{}", self.cluster_name, self.name);
+                            let _ = etcd.delete(pod_key).await;
+                            let events_key = format!("/nokube/{}/events/pod/{}", self.cluster_name, self.name);
+                            let _ = etcd.delete(events_key).await;
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            tracing::warn!("Actor supervise: etcd get {} failed: {}", key, e);
+                        }
+                    }
+                }
+            }
+        }
         Ok(())
     }
 }

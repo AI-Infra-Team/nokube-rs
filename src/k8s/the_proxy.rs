@@ -36,7 +36,7 @@ struct ActorStatus {
     pub cluster_name: String,
     pub status: ComponentStatus,
     pub last_alive: DateTime<Utc>,
-    pub lease_id: Option<u64>,
+    pub lease_id: Option<i64>,
     pub lease_ttl: u64,
 }
 
@@ -146,21 +146,7 @@ impl TheProxy {
         let lease_ttl = request.lease_ttl;
         
         // 更新actor状态
-        {
-            let mut states_guard = states.write().await;
-            let actor_status = ActorStatus {
-                actor_path: actor_path.clone(),
-                actor_type: actor_type.clone(),
-                cluster_name: cluster_name_req,
-                status: status.clone(),
-                last_alive: Utc::now(),
-                lease_id: None, // TODO: 实现etcd lease
-                lease_ttl,
-            };
-            states_guard.insert(actor_path.clone(), actor_status);
-        }
-        
-        // 写入etcd alive冗余key
+        // 先申请租约并写入带租约的 alive key
         let alive_key = format!(
             "/nokube/{}/actors/{}/alive",
             cluster_name,
@@ -176,7 +162,23 @@ impl TheProxy {
         });
         
         let etcd_manager = config_manager.get_etcd_manager();
-        etcd_manager.put(alive_key, alive_data.to_string()).await?;
+        let lease = etcd_manager.grant_lease(lease_ttl as i64).await?;
+        etcd_manager.put_with_lease(alive_key, alive_data.to_string(), lease).await?;
+
+        // 更新本地状态（含租约）
+        {
+            let mut states_guard = states.write().await;
+            let actor_status = ActorStatus {
+                actor_path: actor_path.clone(),
+                actor_type: actor_type.clone(),
+                cluster_name: cluster_name_req,
+                status: status.clone(),
+                last_alive: Utc::now(),
+                lease_id: Some(lease),
+                lease_ttl,
+            };
+            states_guard.insert(actor_path.clone(), actor_status);
+        }
         
         tracing::debug!("Updated alive status for actor: {}", actor_path.to_string());
         Ok(())
@@ -206,26 +208,26 @@ impl TheProxy {
         config_manager: &Arc<ConfigManager>,
         cluster_name: &str,
     ) -> Result<()> {
-        let states_guard = states.read().await;
         let now = Utc::now();
-        
-        for (actor_path, actor_status) in states_guard.iter() {
-            // 检查actor是否超时
+        let mut states_guard = states.write().await;
+        let etcd_manager = config_manager.get_etcd_manager();
+
+        for (actor_path, actor_status) in states_guard.iter_mut() {
+            // 按最后一次 alive 判定
             let elapsed = now.signed_duration_since(actor_status.last_alive);
-            if elapsed > chrono::Duration::seconds(actor_status.lease_ttl as i64 * 2) {
+            let ttl = actor_status.lease_ttl as i64;
+            // 若超时很久，写 Dead 并继续
+            if elapsed > chrono::Duration::seconds(ttl * 2) {
                 tracing::warn!(
                     "Actor {} appears to be dead (no alive signal for {:?})",
                     actor_path.to_string(),
                     elapsed
                 );
-                
-                // 标记为dead
                 let dead_key = format!(
                     "/nokube/{}/actors/{}/alive",
                     cluster_name,
                     actor_path.to_string().replace("/", "-")
                 );
-                
                 let dead_data = serde_json::json!({
                     "actor_path": actor_path.to_string(),
                     "actor_type": actor_status.actor_type,
@@ -233,12 +235,30 @@ impl TheProxy {
                     "last_alive": chrono::Utc::now().to_rfc3339(),
                     "lease_expired": true,
                 });
-                
-                let etcd_manager = config_manager.get_etcd_manager();
                 etcd_manager.put(dead_key, dead_data.to_string()).await?;
+                continue;
+            }
+
+            // 正常：刷新租约（简单做法：重新申请租约并覆盖写入）
+            if elapsed <= chrono::Duration::seconds(ttl) {
+                let alive_key = format!(
+                    "/nokube/{}/actors/{}/alive",
+                    cluster_name,
+                    actor_path.to_string().replace("/", "-")
+                );
+                let alive_data = serde_json::json!({
+                    "actor_path": actor_path.to_string(),
+                    "actor_type": actor_status.actor_type,
+                    "status": actor_status.status.to_string(),
+                    "last_alive": chrono::Utc::now().to_rfc3339(),
+                    "lease_ttl": actor_status.lease_ttl,
+                });
+                let lease = etcd_manager.grant_lease(ttl).await?;
+                etcd_manager.put_with_lease(alive_key, alive_data.to_string(), lease).await?;
+                actor_status.lease_id = Some(lease);
             }
         }
-        
+
         tracing::debug!("Keepalive check completed for {} actors", states_guard.len());
         Ok(())
     }

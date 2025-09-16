@@ -1,5 +1,5 @@
 // KubeController - 负责监控初始组件是否正常运行
-use crate::k8s::{AsyncTaskObject, GlobalAttributionPath, K8sObjectType, ComponentStatus};
+use crate::k8s::{AsyncTaskObject, GlobalAttributionPath, K8sObjectType, ComponentStatus, ActorSupervise};
 use crate::k8s::objects::{DaemonSetObject, DeploymentObject};
 use crate::k8s::the_proxy::{ActorAliveRequest};
 use anyhow::Result;
@@ -161,6 +161,10 @@ impl KubeController {
                                 tracing::error!("Failed to check health for DaemonSet {}: {}", name, e);
                             }
                         }
+                        // 监督各自 pod 的父级状态（统一子随父灭+孤儿回收）
+                        for (_node, pod) in daemonset.pods.iter() {
+                            let _ = pod.supervise_parent().await;
+                        }
                     }
                 }
                 
@@ -178,6 +182,10 @@ impl KubeController {
                             Err(e) => {
                                 tracing::error!("Failed to check health for Deployment {}: {}", name, e);
                             }
+                        }
+                        // 监督 deployment 下各 pod 的父级状态
+                        for (_pname, pod) in deployment.pods.iter() {
+                            let _ = pod.supervise_parent().await;
                         }
                     }
                 }
