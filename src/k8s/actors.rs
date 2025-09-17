@@ -264,8 +264,8 @@ impl PodDescription {
 
             // 构造labels
             let mut labels = HashMap::new();
-            if let Some(labels_obj) = pod_info.get("labels").and_then(|v| v.as_object()) {
-                for (key, value) in labels_obj {
+            if let Some(labels_map) = pod_info.get("labels").and_then(|v| v.as_object()) {
+                for (key, value) in labels_map {
                     if let Some(value_str) = value.as_str() {
                         labels.insert(key.clone(), value_str.to_string());
                     }

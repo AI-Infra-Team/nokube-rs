@@ -1,4 +1,5 @@
 use super::docker_runner::DockerRunner;
+use crate::agent::runtime::deployment::POD_CONTAINER_SEPARATOR;
 use crate::config::{cluster_config::ClusterConfig, etcd_manager::EtcdManager};
 use anyhow::Result;
 use reqwest::Client;
@@ -237,21 +238,23 @@ impl Exporter {
         container: &str,
         node: &str,
         cluster: &str,
-    ) -> (String, String, String) {
-        // 容器名约定: nokube-pod-<pod_name>
-        let pod = container
-            .strip_prefix("nokube-pod-")
-            .unwrap_or(container)
-            .to_string();
-        let mut core = pod.clone();
-        // DaemonSet: <daemonset>-<node>
+    ) -> (String, String, String, String) {
+        let stripped = container.strip_prefix("nokube-pod-").unwrap_or(container);
+        let (pod_segment, container_segment) = if let Some((pod_part, container_part)) =
+            stripped.split_once(POD_CONTAINER_SEPARATOR)
+        {
+            (pod_part.to_string(), container_part.to_string())
+        } else {
+            (stripped.to_string(), "main".to_string())
+        };
+
+        let mut core = pod_segment.clone();
         let ds_suffix = format!("-{}", node);
         if core.ends_with(&ds_suffix) {
             core = core
                 .trim_end_matches(&ds_suffix)
                 .trim_end_matches('-')
                 .to_string();
-            // 若末尾还带 -<cluster>，一起去掉，得到 core 名
             let cluster_suffix = format!("-{}", cluster);
             if core.ends_with(&cluster_suffix) {
                 core = core
@@ -259,9 +262,14 @@ impl Exporter {
                     .trim_end_matches('-')
                     .to_string();
             }
-            return (pod, core, "daemonset".to_string());
+            return (
+                pod_segment,
+                container_segment,
+                core,
+                "daemonset".to_string(),
+            );
         }
-        // 统一去掉 -<cluster>
+
         let cluster_suffix = format!("-{}", cluster);
         if core.ends_with(&cluster_suffix) {
             core = core
@@ -269,13 +277,24 @@ impl Exporter {
                 .trim_end_matches('-')
                 .to_string();
         }
-        // Deployment: 若末段为8hex，则去掉
+
         if let Some((b, last)) = core.rsplit_once('-') {
             if last.len() == 8 && last.chars().all(|c| c.is_ascii_hexdigit()) {
-                return (pod, b.to_string(), "deployment".to_string());
+                return (
+                    pod_segment,
+                    container_segment,
+                    b.to_string(),
+                    "deployment".to_string(),
+                );
             }
         }
-        (pod, core, "deployment".to_string())
+
+        (
+            pod_segment,
+            container_segment,
+            core,
+            "deployment".to_string(),
+        )
     }
 
     /// 转义 Influx 标签值（空格、逗号）
@@ -512,7 +531,7 @@ impl Exporter {
         // 追加容器级别指标
         for (name, (cpu_pct, mem_bytes, mem_pct)) in container_metrics {
             let container_tag = Self::esc_tag(name);
-            let (pod, core_actor, owner_type) =
+            let (pod, container_segment, core_actor, owner_type) =
                 Self::derive_actor_core(name, instance, cluster_name);
             // 规范化顶层名：始终为 <core>-<cluster>
             let canonical_upper = format!("{}-{}", core_actor, cluster_name);
@@ -524,7 +543,10 @@ impl Exporter {
             // absolute cpu in cores
             let cpu_cores_val = (cpu_pct / 100.0) * (metrics.cpu_cores as f64);
             // richer label set for easier Grafana queries
-            let container_path = format!("{}/{}/{}/{}", cluster_name, core_actor, pod, name);
+            let container_path = format!(
+                "{}/{}/{}/{}",
+                cluster_name, core_actor, pod, container_segment
+            );
             let container_path_tag = Self::esc_tag(&container_path);
             let tags = format!(
                 ",cluster_name={},node={},instance={},container={},container_name={},pod={},pod_name={},parent_actor={},root_actor={},top_actor={},upper_actor={},owner_type={},container_path={},canonical=1",

@@ -1122,17 +1122,32 @@ if __name__ == "__main__":
                 );
                 // 跟随该部署容器的日志到 GreptimeDB（actor 面板）
                 if let Some(ref log_collector) = self.log_collector {
-                    let container_name = format!("nokube-pod-{}", deployment_name);
-                    if let Err(e) = log_collector.follow_docker_logs(&container_name).await {
-                        warn!(
-                            "Failed to start following logs for {}: {}",
-                            container_name, e
-                        );
-                    } else {
-                        info!(
-                            "Started log following for actor container: {}",
-                            container_name
-                        );
+                    match crate::agent::runtime::deployment::enumerate_actor_container_names(
+                        &deployment_yaml,
+                        deployment_name,
+                    ) {
+                        Ok(container_names) => {
+                            for docker_name in container_names {
+                                if let Err(e) = log_collector.follow_docker_logs(&docker_name).await
+                                {
+                                    warn!(
+                                        "Failed to start following logs for {}: {}",
+                                        docker_name, e
+                                    );
+                                } else {
+                                    info!(
+                                        "Started log following for actor container: {}",
+                                        docker_name
+                                    );
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            warn!(
+                                "Unable to enumerate container names for deployment {}: {}",
+                                deployment_name, e
+                            );
+                        }
                     }
                 }
 
@@ -1235,7 +1250,7 @@ if __name__ == "__main__":
 
                 if let Some(ref kube_controller) = self.kube_controller {
                     let proxy_tx = kube_controller.proxy_tx.clone();
-                    // Clone spec for daemonset object; keep local for env injection below
+                    // Clone spec for daemonset actor; keep local for env injection below
                     let ds_container_spec = container_spec.clone();
                     let daemonset_obj = DaemonSetActor::new(
                         daemonset_name.to_string(),

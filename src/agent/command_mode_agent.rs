@@ -1216,7 +1216,7 @@ providers:
 
         // 导入第二个仪表板：Actor Dashboard（合并了 service 和 actor）
         println!(
-            "[REALTIME] 📋 Importing NoKube Actor Dashboard (K8s objects, services, containers)..."
+            "[REALTIME] 📋 Importing NoKube Actor Dashboard (K8s actors, services, containers)..."
         );
         std::io::Write::flush(&mut std::io::stdout()).ok();
         self.import_actor_dashboard(grafana_port, node_ip).await?;

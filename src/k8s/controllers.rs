@@ -1,5 +1,7 @@
 // KubeController - 负责监控初始Actor是否正常运行
-use crate::agent::runtime::deployment::{calc_hash_u64, create_deployment_container};
+use crate::agent::runtime::deployment::{
+    calc_hash_u64, create_deployment_container, enumerate_actor_container_names,
+};
 use crate::config::etcd_manager::EtcdManager;
 use crate::k8s::actors::{DaemonSetActor, DeploymentActor};
 use crate::k8s::the_proxy::ActorAliveRequest;
@@ -64,7 +66,7 @@ impl KubeController {
         self.start_actor_health_monitor().await?;
 
         // 启动Actor扫描协程
-        self.start_object_monitor().await?;
+        self.start_actor_monitor().await?;
 
         // 启动配置更新监控协程
         self.start_config_monitor().await?;
@@ -290,7 +292,7 @@ impl KubeController {
         }
     }
 
-    async fn start_object_monitor(&self) -> Result<()> {
+    async fn start_actor_monitor(&self) -> Result<()> {
         let etcd_manager = Arc::clone(&self.etcd_manager);
         let cluster_name = self.cluster_name.clone();
         let workspace = self.workspace.clone();
@@ -299,15 +301,12 @@ impl KubeController {
             use std::collections::HashMap;
 
             let mut interval = interval(Duration::from_secs(15));
-            let mut seen_deploy_checksums: HashMap<String, u64> = HashMap::new();
+            let mut seen_deploy_checksums: HashMap<String, (u64, Vec<String>)> = HashMap::new();
             let mut seen_daemon_checksums: HashMap<String, u64> = HashMap::new();
 
             loop {
                 interval.tick().await;
-                info!(
-                    "Checking for new deployments/daemonsets in cluster: {}",
-                    cluster_name
-                );
+                info!("Scanning actor definitions in cluster: {}", cluster_name);
 
                 let deployment_prefix = format!("/nokube/{}/deployments/", cluster_name);
                 match etcd_manager.get_prefix(deployment_prefix.clone()).await {
@@ -356,7 +355,21 @@ impl KubeController {
                                                 deployment_name, e
                                             );
                                         } else {
-                                            seen_deploy_checksums.insert(key_str.clone(), checksum);
+                                            let container_names = enumerate_actor_container_names(
+                                                &deployment_yaml,
+                                                deployment_name,
+                                            )
+                                            .unwrap_or_else(|err| {
+                                                warn!(
+                                                    "Failed to enumerate containers for {}: {}",
+                                                    deployment_name, err
+                                                );
+                                                vec![format!("nokube-pod-{}", deployment_name)]
+                                            });
+                                            seen_deploy_checksums.insert(
+                                                key_str.clone(),
+                                                (checksum, container_names),
+                                            );
                                         }
                                     }
                                     Err(e) => {
@@ -366,34 +379,38 @@ impl KubeController {
                                         );
                                     }
                                 }
-                            } else if let Some(prev) = seen_deploy_checksums.get(&key_str) {
-                                if *prev != checksum {
+                            } else if let Some((prev_checksum, prev_containers)) =
+                                seen_deploy_checksums.get(&key_str)
+                            {
+                                if *prev_checksum != checksum {
+                                    let previous_containers = prev_containers.clone();
                                     let deployment_name =
                                         key_str.split('/').last().unwrap_or("unknown");
                                     info!(
                                         "🔁 Detected deployment update: {} (key={}), restarting",
                                         deployment_name, key_str
                                     );
-                                    let container_name = format!("nokube-pod-{}", deployment_name);
-                                    if let Err(e) =
-                                        crate::agent::general::DockerRunner::stop(&container_name)
-                                    {
-                                        tracing::warn!(
-                                            "Failed to stop container {}: {}",
-                                            container_name,
-                                            e
-                                        );
-                                    }
-                                    if let Err(e) =
-                                        crate::agent::general::DockerRunner::remove_container(
+                                    for container_name in previous_containers {
+                                        if let Err(e) = crate::agent::general::DockerRunner::stop(
                                             &container_name,
-                                        )
-                                    {
-                                        tracing::warn!(
-                                            "Failed to remove container {}: {}",
-                                            container_name,
-                                            e
-                                        );
+                                        ) {
+                                            tracing::warn!(
+                                                "Failed to stop container {}: {}",
+                                                container_name,
+                                                e
+                                            );
+                                        }
+                                        if let Err(e) =
+                                            crate::agent::general::DockerRunner::remove_container(
+                                                &container_name,
+                                            )
+                                        {
+                                            tracing::warn!(
+                                                "Failed to remove container {}: {}",
+                                                container_name,
+                                                e
+                                            );
+                                        }
                                     }
                                     match serde_yaml::from_str::<serde_yaml::Value>(&value_str) {
                                         Ok(deployment_yaml) => {
@@ -413,8 +430,25 @@ impl KubeController {
                                                     deployment_name, e
                                                 );
                                             } else {
-                                                seen_deploy_checksums
-                                                    .insert(key_str.clone(), checksum);
+                                                let container_names =
+                                                    enumerate_actor_container_names(
+                                                        &deployment_yaml,
+                                                        deployment_name,
+                                                    )
+                                                    .unwrap_or_else(|err| {
+                                                        warn!(
+                                                            "Failed to enumerate containers for {} after update: {}",
+                                                            deployment_name, err
+                                                        );
+                                                        vec![format!(
+                                                            "nokube-pod-{}",
+                                                            deployment_name
+                                                        )]
+                                                    });
+                                                seen_deploy_checksums.insert(
+                                                    key_str.clone(),
+                                                    (checksum, container_names),
+                                                );
                                             }
                                         }
                                         Err(e) => {
@@ -428,7 +462,41 @@ impl KubeController {
                             }
                         }
 
-                        seen_deploy_checksums = current_map;
+                        let removed_deployments: Vec<String> = seen_deploy_checksums
+                            .keys()
+                            .filter(|existing_key| !current_map.contains_key(*existing_key))
+                            .cloned()
+                            .collect();
+
+                        for key in removed_deployments {
+                            let deployment_name = key.split('/').last().unwrap_or("unknown");
+                            info!(
+                                "Detected deployment removal: {} (key={}), cleaning up",
+                                deployment_name, key
+                            );
+                            if let Some((_, container_names)) = seen_deploy_checksums.remove(&key) {
+                                for container_name in container_names {
+                                    if let Err(e) =
+                                        crate::agent::general::DockerRunner::stop(&container_name)
+                                    {
+                                        warn!(
+                                            "Failed to stop container {} during removal handling: {}",
+                                            container_name, e
+                                        );
+                                    }
+                                    if let Err(e) =
+                                        crate::agent::general::DockerRunner::remove_container(
+                                            &container_name,
+                                        )
+                                    {
+                                        warn!(
+                                            "Failed to remove container {} during removal handling: {}",
+                                            container_name, e
+                                        );
+                                    }
+                                }
+                            }
+                        }
                     }
                     Err(e) => {
                         warn!("Failed to check deployments: {}", e);
@@ -491,6 +559,11 @@ impl KubeController {
                             .cloned()
                             .collect();
                         for key in removed {
+                            let daemonset_name = key.split('/').last().unwrap_or("unknown");
+                            info!(
+                                "Detected daemonset removal: {} (key={}), cleaning up",
+                                daemonset_name, key
+                            );
                             seen_daemon_checksums.remove(&key);
                         }
                     }

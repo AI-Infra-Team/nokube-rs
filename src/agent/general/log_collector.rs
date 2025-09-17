@@ -267,7 +267,7 @@ X-Greptime-Log-Extract-Keys=cluster_name,node_name,source,source_id,container,po
             let mut scope_name: Option<&'static str> = None;
             if log_entry.source == "actor" {
                 // 基于 exporter 的解析逻辑，推导 root_actor / pod / container_path
-                let (pod_name, root_actor, _owner_type) =
+                let (pod_name, container_segment, root_actor, _owner_type) =
                     crate::agent::general::exporter::Exporter::derive_actor_core(
                         &log_entry.source_id,
                         &log_entry.node_name,
@@ -275,9 +275,10 @@ X-Greptime-Log-Extract-Keys=cluster_name,node_name,source,source_id,container,po
                     );
                 let container_path = format!(
                     "{}/{}/{}/{}",
-                    log_entry.cluster_name, root_actor, pod_name, log_entry.source_id
+                    log_entry.cluster_name, root_actor, pod_name, container_segment
                 );
                 attributes.push(("pod".into(), pod_name.into()));
+                attributes.push(("container_name".into(), container_segment.into()));
                 attributes.push(("root_actor".into(), root_actor.into()));
                 attributes.push(("container_path".into(), container_path.clone().into()));
                 scope_name = Some(get_or_leak_scope_name(&container_path));
@@ -438,13 +439,17 @@ X-Greptime-Log-Extract-Keys=cluster_name,node_name,source,source_id,container,po
                                     let mut f = HashMap::new();
                                     f.insert("container".to_string(), container.clone());
                                     if is_actor {
-                                        let (pod_name, root_actor, _owner) = crate::agent::general::exporter::Exporter::derive_actor_core(
+                                        let (pod_name, container_segment, root_actor, _owner) = crate::agent::general::exporter::Exporter::derive_actor_core(
                                             &container, &node_name, &cluster_name);
                                         f.insert("pod".to_string(), pod_name.clone());
+                                        f.insert(
+                                            "container_name".to_string(),
+                                            container_segment.clone(),
+                                        );
                                         f.insert("root_actor".to_string(), root_actor.clone());
                                         let path = format!(
                                             "{}/{}/{}/{}",
-                                            cluster_name, root_actor, pod_name, container
+                                            cluster_name, root_actor, pod_name, container_segment
                                         );
                                         f.insert("container_path".to_string(), path);
                                     }
@@ -480,13 +485,17 @@ X-Greptime-Log-Extract-Keys=cluster_name,node_name,source,source_id,container,po
                                     let mut f = HashMap::new();
                                     f.insert("container".to_string(), container.clone());
                                     if is_actor {
-                                        let (pod_name, root_actor, _owner) = crate::agent::general::exporter::Exporter::derive_actor_core(
+                                        let (pod_name, container_segment, root_actor, _owner) = crate::agent::general::exporter::Exporter::derive_actor_core(
                                             &container, &node_name, &cluster_name);
                                         f.insert("pod".to_string(), pod_name.clone());
+                                        f.insert(
+                                            "container_name".to_string(),
+                                            container_segment.clone(),
+                                        );
                                         f.insert("root_actor".to_string(), root_actor.clone());
                                         let path = format!(
                                             "{}/{}/{}/{}",
-                                            cluster_name, root_actor, pod_name, container
+                                            cluster_name, root_actor, pod_name, container_segment
                                         );
                                         f.insert("container_path".to_string(), path);
                                     }
