@@ -8,15 +8,22 @@ pub struct GrafanaManager {
     greptimedb_endpoint: String,
     ssh_manager: Option<SSHManager>,
     workspace: String,
+    grafana_host: String,
 }
 
 impl GrafanaManager {
-    pub fn new(port: u16, greptimedb_endpoint: String, workspace: String) -> Self {
+    pub fn new(
+        port: u16,
+        greptimedb_endpoint: String,
+        workspace: String,
+        grafana_host: String,
+    ) -> Self {
         Self {
             port,
             greptimedb_endpoint,
             ssh_manager: None,
             workspace,
+            grafana_host,
         }
     }
 
@@ -25,13 +32,26 @@ impl GrafanaManager {
         greptimedb_endpoint: String,
         workspace: String,
         ssh_manager: SSHManager,
+        grafana_host: String,
     ) -> Self {
         Self {
             port,
             greptimedb_endpoint,
             ssh_manager: Some(ssh_manager),
             workspace,
+            grafana_host,
         }
+    }
+
+    fn create_http_client() -> Result<reqwest::Client> {
+        reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .map_err(|e| anyhow::anyhow!("Failed to build local HTTP client: {}", e))
+    }
+
+    fn grafana_base_url(&self) -> String {
+        format!("http://{}:{}", self.grafana_host, self.port)
     }
 
     pub async fn setup_grafana(&self, cluster_name: &str) -> Result<()> {
@@ -313,8 +333,8 @@ isDefault = true
             }
         });
 
-        let client = reqwest::Client::new();
-        let grafana_url = format!("http://localhost:{}/api/datasources", self.port);
+        let client = Self::create_http_client()?;
+        let grafana_url = format!("{}/api/datasources", self.grafana_base_url());
 
         let response = client
             .post(&grafana_url)
@@ -377,8 +397,8 @@ isDefault = true
             if status.as_u16() == 409 || error_text.to_lowercase().contains("already exists") {
                 // Try to update existing datasource to ensure URL set
                 let get_url = format!(
-                    "http://localhost:{}/api/datasources/name/greptimeplugin",
-                    self.port
+                    "{}/api/datasources/name/greptimeplugin",
+                    self.grafana_base_url()
                 );
                 if let Ok(get_resp) = client
                     .get(&get_url)
@@ -389,10 +409,8 @@ isDefault = true
                     if get_resp.status().is_success() {
                         if let Ok(val) = get_resp.json::<serde_json::Value>().await {
                             if let Some(id) = val.get("id").and_then(|v| v.as_i64()) {
-                                let put_url = format!(
-                                    "http://localhost:{}/api/datasources/{}",
-                                    self.port, id
-                                );
+                                let put_url =
+                                    format!("{}/api/datasources/{}", self.grafana_base_url(), id);
                                 let _ = client
                                     .put(&put_url)
                                     .header("Content-Type", "application/json")
@@ -450,8 +468,8 @@ isDefault = true
 
     async fn wait_for_grafana_api(&self) -> Result<()> {
         info!("Waiting for Grafana API to be available...");
-        let client = reqwest::Client::new();
-        let health_url = format!("http://localhost:{}/api/health", self.port);
+        let client = Self::create_http_client()?;
+        let health_url = format!("{}/api/health", self.grafana_base_url());
 
         for attempt in 1..=10 {
             match client.get(&health_url).send().await {
@@ -486,9 +504,9 @@ isDefault = true
         // Create a default dashboard with panels for memory (containers), CPU, and network metrics
         // To ensure layout updates take effect, delete any existing dashboard with same UID first
         self.wait_for_grafana_api().await?;
-        let client_pre = reqwest::Client::new();
+        let client_pre = Self::create_http_client()?;
         let uid = "nokube-cluster-monitoring";
-        let get_url = format!("http://localhost:{}/api/dashboards/uid/{}", self.port, uid);
+        let get_url = format!("{}/api/dashboards/uid/{}", self.grafana_base_url(), uid);
         if let Ok(resp) = client_pre
             .get(&get_url)
             .basic_auth("admin", Some("admin"))
@@ -496,7 +514,7 @@ isDefault = true
             .await
         {
             if resp.status().is_success() {
-                let del_url = format!("http://localhost:{}/api/dashboards/uid/{}", self.port, uid);
+                let del_url = format!("{}/api/dashboards/uid/{}", self.grafana_base_url(), uid);
                 let _ = client_pre
                     .delete(&del_url)
                     .basic_auth("admin", Some("admin"))
@@ -696,8 +714,8 @@ isDefault = true
             "overwrite": true
         });
 
-        let client = reqwest::Client::new();
-        let grafana_url = format!("http://localhost:{}/api/dashboards/db", self.port);
+        let client = Self::create_http_client()?;
+        let grafana_url = format!("{}/api/dashboards/db", self.grafana_base_url());
 
         let response = client
             .post(&grafana_url)
@@ -730,8 +748,8 @@ isDefault = true
     }
 
     async fn set_home_dashboard(&self, uid: &str) -> Result<()> {
-        let client = reqwest::Client::new();
-        let prefs_url = format!("http://localhost:{}/api/org/preferences", self.port);
+        let client = Self::create_http_client()?;
+        let prefs_url = format!("{}/api/org/preferences", self.grafana_base_url());
         let body = serde_json::json!({
             "homeDashboardUID": uid
         });
@@ -748,7 +766,7 @@ isDefault = true
             anyhow::bail!("Failed to set home dashboard: {} - {}", status, text);
         }
         // Star the dashboard
-        let get_url = format!("http://localhost:{}/api/dashboards/uid/{}", self.port, uid);
+        let get_url = format!("{}/api/dashboards/uid/{}", self.grafana_base_url(), uid);
         let dash = client
             .get(&get_url)
             .basic_auth("admin", Some("admin"))
@@ -762,8 +780,9 @@ isDefault = true
                     .and_then(|v| v.as_i64())
                 {
                     let star_url = format!(
-                        "http://localhost:{}/api/user/stars/dashboard/{}",
-                        self.port, id
+                        "{}/api/user/stars/dashboard/{}",
+                        self.grafana_base_url(),
+                        id
                     );
                     let _ = client
                         .post(&star_url)
@@ -990,8 +1009,8 @@ isDefault = true
             "overwrite": true
         });
 
-        let client = reqwest::Client::new();
-        let grafana_url = format!("http://localhost:{}/api/dashboards/db", self.port);
+        let client = Self::create_http_client()?;
+        let grafana_url = format!("{}/api/dashboards/db", self.grafana_base_url());
 
         let response = client
             .post(&grafana_url)
@@ -1179,8 +1198,8 @@ isDefault = true
             "overwrite": true
         });
 
-        let client = reqwest::Client::new();
-        let grafana_url = format!("http://localhost:{}/api/dashboards/db", self.port);
+        let client = Self::create_http_client()?;
+        let grafana_url = format!("{}/api/dashboards/db", self.grafana_base_url());
 
         let response = client
             .post(&grafana_url)
@@ -1368,8 +1387,8 @@ isDefault = true
             "overwrite": true
         });
 
-        let client = reqwest::Client::new();
-        let grafana_url = format!("http://localhost:{}/api/dashboards/db", self.port);
+        let client = Self::create_http_client()?;
+        let grafana_url = format!("{}/api/dashboards/db", self.grafana_base_url());
 
         let response = client
             .post(&grafana_url)

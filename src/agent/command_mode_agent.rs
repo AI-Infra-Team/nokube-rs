@@ -3,7 +3,7 @@ use crate::config::cluster_config::ClusterConfig;
 use anyhow::Result;
 use std::io::Write;
 use std::process::Command;
-use tracing::{error, info};
+use tracing::{debug, error, info};
 
 #[derive(Debug, Clone)]
 pub enum DependencyType {
@@ -140,6 +140,14 @@ impl CommandModeAgent {
             .and_then(|params| params.get("workspace"))
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("Missing required workspace in extra_params"))
+    }
+
+    /// 构建不走代理的 HTTP 客户端，避免访问本地容器时被环境代理截走
+    fn create_local_http_client() -> Result<reqwest::Client> {
+        reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .map_err(|e| anyhow::anyhow!("Failed to build local HTTP client: {}", e))
     }
 
     pub async fn execute(&self) -> Result<()> {
@@ -682,9 +690,9 @@ providers:
                             );
                             let check_hosts = vec![node_ip.to_string(), "127.0.0.1".to_string()];
                             let mut retries = 0;
-                            let max_retries = 90; // extend to 90秒，容器首次拉取/初始化插件可能较慢
+                            let max_retries = 180; // allow up to 3 minutes for heavy migrations/plugins
                             let mut grafana_ready = false;
-                            let client = reqwest::Client::new();
+                            let client = Self::create_local_http_client()?;
 
                             while retries < max_retries && !grafana_ready {
                                 for host in &check_hosts {
@@ -708,10 +716,19 @@ providers:
                                                 );
                                                 grafana_ready = true;
                                                 break;
+                                            } else {
+                                                debug!(
+                                                    "Grafana health endpoint {} returned status {}",
+                                                    url,
+                                                    response.status()
+                                                );
                                             }
                                         }
-                                        Err(_) => {
-                                            // 继续等待
+                                        Err(err) => {
+                                            debug!(
+                                                "Grafana health check to {} failed: {}",
+                                                url, err
+                                            );
                                         }
                                     }
                                 }
@@ -1086,7 +1103,7 @@ providers:
             }
         });
 
-        let client = reqwest::Client::new();
+        let client = Self::create_local_http_client()?;
         let grafana_url = format!("http://{}:{}/api/datasources", node_ip, grafana_port);
 
         // 尝试配置数据源
@@ -1251,7 +1268,7 @@ providers:
     }
 
     async fn set_home_dashboard(&self, grafana_port: u16, node_ip: &str, uid: &str) -> Result<()> {
-        let client = reqwest::Client::new();
+        let client = Self::create_local_http_client()?;
         let prefs_url = format!("http://{}:{}/api/org/preferences", node_ip, grafana_port);
         let grafana_user = self
             .config
@@ -1338,7 +1355,7 @@ providers:
 
         // delete existing to avoid stale layout
         {
-            let client_pre = reqwest::Client::new();
+            let client_pre = Self::create_local_http_client()?;
             let uid = "nokube-cluster-monitoring";
             let get_url = format!(
                 "http://{}:{}/api/dashboards/uid/{}",
@@ -1521,7 +1538,7 @@ providers:
             "overwrite": true
         });
 
-        let client = reqwest::Client::new();
+        let client = Self::create_local_http_client()?;
         let grafana_url = format!("http://{}:{}/api/dashboards/db", node_ip, grafana_port);
 
         let grafana_user = self
@@ -1660,7 +1677,7 @@ providers:
             "overwrite": true
         });
 
-        let client = reqwest::Client::new();
+        let client = Self::create_local_http_client()?;
         let grafana_url = format!("http://{}:{}/api/dashboards/db", node_ip, grafana_port);
 
         let response = client
@@ -1730,7 +1747,7 @@ providers:
             );
         }
 
-        let client = reqwest::Client::new();
+        let client = Self::create_local_http_client()?;
         let url = format!("http://{}:{}/api/datasources", node_ip, grafana_port);
         let grafana_user = self
             .config
@@ -1840,7 +1857,7 @@ providers:
             "overwrite": true
         });
 
-        let client = reqwest::Client::new();
+        let client = Self::create_local_http_client()?;
         let grafana_url = format!("http://{}:{}/api/dashboards/db", node_ip, grafana_port);
         let response = client
             .post(&grafana_url)

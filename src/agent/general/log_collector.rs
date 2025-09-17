@@ -12,9 +12,12 @@ use reqwest;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::process::Command;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 use tokio::time::{interval, Duration};
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 // Global cache to hold leaked &'static str for dynamic scope names (container_path)
@@ -43,6 +46,17 @@ pub struct LogEntry {
     pub fields: HashMap<String, String>, // 额外字段
 }
 
+#[derive(Debug, Clone)]
+pub enum LogCollectorCommand {
+    FollowContainer { name: String },
+    StopContainer { name: String },
+}
+
+struct ContainerFollowHandle {
+    cancel_token: CancellationToken,
+    task: JoinHandle<()>,
+}
+
 /// 日志收集器配置
 #[derive(Debug, Clone)]
 pub struct LogCollectorConfig {
@@ -64,11 +78,15 @@ pub struct LogCollector {
     log_tx: mpsc::Sender<LogEntry>,
     client: reqwest::Client,
     logger_provider: LoggerProvider,
+    command_tx: mpsc::Sender<LogCollectorCommand>,
+    command_rx: mpsc::Receiver<LogCollectorCommand>,
+    follow_handles: Arc<tokio::sync::Mutex<HashMap<String, ContainerFollowHandle>>>,
 }
 
 impl LogCollector {
     pub fn new(config: LogCollectorConfig) -> Result<Self> {
         let (log_tx, log_rx) = mpsc::channel(10000);
+        let (command_tx, command_rx) = mpsc::channel(256);
         let client = reqwest::Client::new();
 
         // 设置 OpenTelemetry 全局错误处理器
@@ -131,12 +149,20 @@ X-Greptime-Log-Extract-Keys=cluster_name,node_name,source,source_id,container,po
             log_tx,
             client,
             logger_provider,
+            command_tx,
+            command_rx,
+            follow_handles: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         })
     }
 
     /// 获取日志发送器
     pub fn get_log_sender(&self) -> mpsc::Sender<LogEntry> {
         self.log_tx.clone()
+    }
+
+    /// 获取控制命令发送器
+    pub fn command_sender(&self) -> mpsc::Sender<LogCollectorCommand> {
+        self.command_tx.clone()
     }
 
     /// 启动日志收集器
@@ -153,6 +179,23 @@ X-Greptime-Log-Extract-Keys=cluster_name,node_name,source,source_id,container,po
 
         tokio::spawn(async move {
             Self::run_log_processor(log_rx, config, logger_provider).await;
+        });
+
+        let command_rx = std::mem::replace(&mut self.command_rx, mpsc::channel(1).1);
+        let follow_handles = Arc::clone(&self.follow_handles);
+        let log_tx = self.log_tx.clone();
+        let cluster_name = self.config.cluster_name.clone();
+        let node_name = self.config.node_name.clone();
+
+        tokio::spawn(async move {
+            Self::run_command_processor(
+                command_rx,
+                follow_handles,
+                log_tx,
+                cluster_name,
+                node_name,
+            )
+            .await;
         });
 
         info!("Log collector started");
@@ -197,6 +240,215 @@ X-Greptime-Log-Extract-Keys=cluster_name,node_name,source,source_id,container,po
                     if !buffer.is_empty() {
                         Self::flush_logs_otlp(&buffer, &logger_provider, config.flush_timeout_secs).await;
                         buffer.clear();
+                    }
+                }
+            }
+        }
+    }
+
+    async fn run_command_processor(
+        mut command_rx: mpsc::Receiver<LogCollectorCommand>,
+        follow_handles: Arc<tokio::sync::Mutex<HashMap<String, ContainerFollowHandle>>>,
+        log_tx: mpsc::Sender<LogEntry>,
+        cluster_name: String,
+        node_name: String,
+    ) {
+        while let Some(command) = command_rx.recv().await {
+            match command {
+                LogCollectorCommand::FollowContainer { name } => {
+                    let mut handles = follow_handles.lock().await;
+                    if handles.contains_key(&name) {
+                        continue;
+                    }
+
+                    let cancel = CancellationToken::new();
+                    let follow_handles_clone = Arc::clone(&follow_handles);
+                    let container_name = name.clone();
+                    let sender = log_tx.clone();
+                    let cluster = cluster_name.clone();
+                    let node = node_name.clone();
+                    let token = cancel.clone();
+
+                    let task = tokio::spawn(async move {
+                        Self::follow_container_loop(
+                            container_name.clone(),
+                            sender,
+                            cluster,
+                            node,
+                            token,
+                        )
+                        .await;
+
+                        let mut handles = follow_handles_clone.lock().await;
+                        handles.remove(&container_name);
+                    });
+
+                    handles.insert(
+                        name,
+                        ContainerFollowHandle {
+                            cancel_token: cancel,
+                            task,
+                        },
+                    );
+                }
+                LogCollectorCommand::StopContainer { name } => {
+                    let mut handles = follow_handles.lock().await;
+                    if let Some(handle) = handles.remove(&name) {
+                        handle.cancel_token.cancel();
+                        handle.task.abort();
+                    }
+                }
+            }
+        }
+    }
+
+    async fn follow_container_loop(
+        container_name: String,
+        sender: mpsc::Sender<LogEntry>,
+        cluster_name: String,
+        node_name: String,
+        cancel_token: CancellationToken,
+    ) {
+        let source_label = if container_name.starts_with("nokube-pod-") {
+            "actor"
+        } else {
+            "docker"
+        };
+
+        loop {
+            if cancel_token.is_cancelled() {
+                break;
+            }
+
+            let runtime_path =
+                DockerRunner::get_runtime_path().unwrap_or_else(|_| "docker".to_string());
+            let mut cmd = tokio::process::Command::new(runtime_path);
+            cmd.args(&["logs", "-f", "--tail", "10", &container_name]);
+            cmd.stdout(std::process::Stdio::piped());
+            cmd.stderr(std::process::Stdio::piped());
+
+            match cmd.spawn() {
+                Ok(mut child) => {
+                    if let Some(stdout) = child.stdout.take() {
+                        let sender_clone = sender.clone();
+                        let cancel_clone = cancel_token.clone();
+                        let container_clone = container_name.clone();
+                        let cluster_clone = cluster_name.clone();
+                        let node_clone = node_name.clone();
+                        let level = "INFO".to_string();
+                        let source = source_label.to_string();
+                        tokio::spawn(async move {
+                            Self::consume_stream(
+                                stdout,
+                                sender_clone,
+                                cluster_clone,
+                                node_clone,
+                                container_clone,
+                                source,
+                                level,
+                                cancel_clone,
+                            )
+                            .await;
+                        });
+                    }
+
+                    if let Some(stderr) = child.stderr.take() {
+                        let sender_clone = sender.clone();
+                        let cancel_clone = cancel_token.clone();
+                        let container_clone = container_name.clone();
+                        let cluster_clone = cluster_name.clone();
+                        let node_clone = node_name.clone();
+                        let source = source_label.to_string();
+                        tokio::spawn(async move {
+                            Self::consume_stream(
+                                stderr,
+                                sender_clone,
+                                cluster_clone,
+                                node_clone,
+                                container_clone,
+                                source,
+                                "ERROR".to_string(),
+                                cancel_clone,
+                            )
+                            .await;
+                        });
+                    }
+
+                    tokio::select! {
+                        _ = cancel_token.cancelled() => {
+                            let _ = child.start_kill();
+                            let _ = child.wait().await;
+                        }
+                        _ = child.wait() => {}
+                    }
+                }
+                Err(e) => {
+                    error!(
+                        "Failed to spawn docker logs command for {}: {}",
+                        container_name, e
+                    );
+                }
+            }
+
+            if cancel_token.is_cancelled() {
+                break;
+            }
+
+            tokio::select! {
+                _ = cancel_token.cancelled() => break,
+                _ = tokio::time::sleep(Duration::from_secs(5)) => {}
+            }
+        }
+    }
+
+    async fn consume_stream<R>(
+        reader: R,
+        sender: mpsc::Sender<LogEntry>,
+        cluster_name: String,
+        node_name: String,
+        container_name: String,
+        source_label: String,
+        level: String,
+        cancel_token: CancellationToken,
+    ) where
+        R: tokio::io::AsyncRead + Unpin,
+    {
+        let mut reader = BufReader::new(reader);
+        let mut lines = reader.lines();
+
+        while !cancel_token.is_cancelled() {
+            tokio::select! {
+                _ = cancel_token.cancelled() => break,
+                line = lines.next_line() => {
+                    match line {
+                        Ok(Some(line)) => {
+                            if line.trim().is_empty() {
+                                continue;
+                            }
+                            let mut fields = HashMap::new();
+                            fields.insert("container".to_string(), container_name.clone());
+
+                            let entry = LogEntry {
+                                timestamp: Utc::now(),
+                                level: level.clone(),
+                                source: source_label.clone(),
+                                source_id: container_name.clone(),
+                                cluster_name: cluster_name.clone(),
+                                node_name: node_name.clone(),
+                                message: format!("[{}] {}", container_name, line),
+                                fields,
+                            };
+
+                            if let Err(e) = sender.send(entry).await {
+                                error!("Failed to send log entry for {}: {}", container_name, e);
+                                break;
+                            }
+                        }
+                        Ok(None) => break,
+                        Err(e) => {
+                            warn!("Failed to read log line for {}: {}", container_name, e);
+                            break;
+                        }
                     }
                 }
             }
@@ -526,108 +778,34 @@ X-Greptime-Log-Extract-Keys=cluster_name,node_name,source,source_id,container,po
 
     /// 持续收集Docker容器日志 (follow模式)
     pub async fn follow_docker_logs(&self, container_name: &str) -> Result<()> {
-        info!(
-            "Starting to follow Docker logs for container: {}",
-            container_name
-        );
+        self.command_tx
+            .send(LogCollectorCommand::FollowContainer {
+                name: container_name.to_string(),
+            })
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to enqueue follow command for {}: {}",
+                    container_name,
+                    e
+                )
+            })?;
+        Ok(())
+    }
 
-        let sender = self.log_tx.clone();
-        let cluster_name = self.config.cluster_name.clone();
-        let node_name = self.config.node_name.clone();
-        let container = container_name.to_string();
-
-        tokio::spawn(async move {
-            loop {
-                let runtime_path =
-                    DockerRunner::get_runtime_path().unwrap_or_else(|_| "docker".to_string());
-                let mut cmd = tokio::process::Command::new(runtime_path);
-                cmd.args(&["logs", "-f", "--tail", "10", &container]);
-                cmd.stdout(std::process::Stdio::piped());
-                cmd.stderr(std::process::Stdio::piped());
-
-                match cmd.spawn() {
-                    Ok(mut child) => {
-                        if let Some(stdout) = child.stdout.take() {
-                            use tokio::io::{AsyncBufReadExt, BufReader};
-                            let reader = BufReader::new(stdout);
-                            let mut lines = reader.lines();
-                            let is_actor = container.starts_with("nokube-pod-");
-                            let source_label = if is_actor { "actor" } else { "docker" };
-
-                            while let Ok(Some(line)) = lines.next_line().await {
-                                if !line.trim().is_empty() {
-                                    let msg = format!("[{}] {}", container, line);
-                                    let entry = LogEntry {
-                                        timestamp: Utc::now(),
-                                        level: "INFO".to_string(),
-                                        source: source_label.to_string(),
-                                        source_id: container.clone(),
-                                        cluster_name: cluster_name.clone(),
-                                        node_name: node_name.clone(),
-                                        message: msg,
-                                        fields: HashMap::new(),
-                                    };
-
-                                    if let Err(e) = sender.send(entry).await {
-                                        error!("Failed to send follow Docker log entry: {:?}", e);
-                                        break;
-                                    } else {
-                                        debug!("Sent follow Docker log entry: container={}, level=INFO", container);
-                                    }
-                                }
-                            }
-                        }
-                        // 处理 stderr 流
-                        if let Some(stderr) = child.stderr.take() {
-                            let sender_err = sender.clone();
-                            let container_err = container.clone();
-                            let cluster_err = cluster_name.clone();
-                            let node_err = node_name.clone();
-                            let is_actor = container_err.starts_with("nokube-pod-");
-                            let source_label = if is_actor { "actor" } else { "docker" };
-                            tokio::spawn(async move {
-                                use tokio::io::{AsyncBufReadExt, BufReader};
-                                let reader = BufReader::new(stderr);
-                                let mut lines = reader.lines();
-                                while let Ok(Some(line)) = lines.next_line().await {
-                                    if !line.trim().is_empty() {
-                                        let msg = format!("[{}] {}", container_err, line);
-                                        let entry = LogEntry {
-                                            timestamp: Utc::now(),
-                                            level: "ERROR".to_string(),
-                                            source: source_label.to_string(),
-                                            source_id: container_err.clone(),
-                                            cluster_name: cluster_err.clone(),
-                                            node_name: node_err.clone(),
-                                            message: msg,
-                                            fields: HashMap::new(),
-                                        };
-                                        if let Err(e) = sender_err.send(entry).await {
-                                            error!("Failed to send follow Docker stderr log entry: {:?}", e);
-                                            break;
-                                        } else {
-                                            debug!("Sent follow Docker stderr log entry: container={}, level=ERROR", container_err);
-                                        }
-                                    }
-                                }
-                            });
-                        }
-
-                        let _ = child.wait().await;
-                    }
-                    Err(e) => {
-                        error!(
-                            "Failed to spawn docker logs command for {}: {}",
-                            container, e
-                        );
-                    }
-                }
-
-                // 重连前等待一段时间
-                tokio::time::sleep(Duration::from_secs(5)).await;
-            }
-        });
-
+    pub async fn stop_following_container(&self, container_name: &str) -> Result<()> {
+        self.command_tx
+            .send(LogCollectorCommand::StopContainer {
+                name: container_name.to_string(),
+            })
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to enqueue stop command for {}: {}",
+                    container_name,
+                    e
+                )
+            })?;
         Ok(())
     }
 }

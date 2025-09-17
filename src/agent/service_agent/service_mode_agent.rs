@@ -156,19 +156,11 @@ impl ServiceModeAgent {
             .follow_docker_logs("nokube-greptimedb")
             .await?;
         let _ = log_collector.follow_docker_logs("nokube-httpserver").await;
-        // 追加：跟随已有的 actor 容器日志（前缀 nokube-pod-）
-        let runtime_path =
-            DockerRunner::get_runtime_path().unwrap_or_else(|_| "docker".to_string());
-        if let Ok(output) = std::process::Command::new(runtime_path)
-            .args(["ps", "--format", "{{.Names}}"])
-            .output()
-        {
-            let names = String::from_utf8_lossy(&output.stdout);
-            for name in names.lines() {
-                if name.starts_with("nokube-pod-") {
-                    let _ = log_collector.follow_docker_logs(name).await;
-                }
-            }
+
+        if let Some(kube_controller) = &self.kube_controller {
+            kube_controller
+                .register_log_collector(log_collector.command_sender())
+                .await?;
         }
 
         info!("Log collector initialized and started");

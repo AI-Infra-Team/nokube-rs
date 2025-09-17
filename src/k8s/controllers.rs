@@ -1,4 +1,5 @@
 // KubeController - 负责监控初始Actor是否正常运行
+use crate::agent::general::log_collector::LogCollectorCommand;
 use crate::agent::runtime::deployment::{
     calc_hash_u64, create_deployment_container, enumerate_actor_container_names,
 };
@@ -8,8 +9,9 @@ use crate::k8s::the_proxy::ActorAliveRequest;
 use crate::k8s::{ActorActionPlan, ActorKind, ActorState, AsyncActor, GlobalAttributionPath};
 use anyhow::Result;
 use std::collections::HashMap;
+use std::process::Command;
 use std::sync::Arc;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio::time::{interval, Duration};
 use tracing::{error, info, warn};
 
@@ -28,6 +30,7 @@ pub struct KubeController {
     pub proxy_tx: mpsc::Sender<ActorAliveRequest>,
 
     etcd_manager: Arc<EtcdManager>,
+    log_notifier: Arc<Mutex<Option<mpsc::Sender<LogCollectorCommand>>>>,
 
     // 运行状态
     pub status: ActorState,
@@ -52,7 +55,108 @@ impl KubeController {
             deployments: Arc::new(RwLock::new(HashMap::new())),
             proxy_tx,
             etcd_manager,
+            log_notifier: Arc::new(Mutex::new(None)),
             status: ActorState::Starting,
+        }
+    }
+
+    pub async fn register_log_collector(
+        &self,
+        sender: mpsc::Sender<LogCollectorCommand>,
+    ) -> Result<()> {
+        {
+            let mut guard = self.log_notifier.lock().await;
+            *guard = Some(sender.clone());
+        }
+
+        self.send_existing_container_notifications(&sender).await;
+        Ok(())
+    }
+
+    async fn send_existing_container_notifications(
+        &self,
+        sender: &mpsc::Sender<LogCollectorCommand>,
+    ) {
+        let runtime_path = crate::agent::general::DockerRunner::get_runtime_path()
+            .unwrap_or_else(|_| "docker".to_string());
+        match Command::new(&runtime_path)
+            .args(["ps", "--format", "{{.Names}}"])
+            .output()
+        {
+            Ok(output) => {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                for name in stdout.lines() {
+                    if name.starts_with("nokube-pod-") {
+                        if let Err(e) = sender
+                            .send(LogCollectorCommand::FollowContainer {
+                                name: name.to_string(),
+                            })
+                            .await
+                        {
+                            warn!(
+                                "Failed to enqueue existing container follow command ({}): {}",
+                                name, e
+                            );
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                warn!(
+                    "Failed to enumerate existing containers for log collector: {}",
+                    e
+                );
+            }
+        }
+    }
+
+    async fn publish_follow_commands(
+        notifier: &Arc<Mutex<Option<mpsc::Sender<LogCollectorCommand>>>>,
+        containers: &[String],
+    ) {
+        if containers.is_empty() {
+            return;
+        }
+
+        let maybe_tx = {
+            let guard = notifier.lock().await;
+            guard.clone()
+        };
+
+        if let Some(tx) = maybe_tx {
+            for name in containers {
+                if let Err(e) = tx
+                    .send(LogCollectorCommand::FollowContainer { name: name.clone() })
+                    .await
+                {
+                    warn!("Failed to notify log collector to follow {}: {}", name, e);
+                }
+            }
+        }
+    }
+
+    async fn publish_stop_commands(
+        notifier: &Arc<Mutex<Option<mpsc::Sender<LogCollectorCommand>>>>,
+        containers: &[String],
+    ) {
+        if containers.is_empty() {
+            return;
+        }
+
+        let maybe_tx = {
+            let guard = notifier.lock().await;
+            guard.clone()
+        };
+
+        if let Some(tx) = maybe_tx {
+            for name in containers {
+                if let Err(e) = tx
+                    .send(LogCollectorCommand::StopContainer { name: name.clone() })
+                    .await
+                {
+                    warn!("Failed to notify log collector to stop {}: {}", name, e);
+                }
+            }
         }
     }
 
@@ -160,6 +264,7 @@ impl KubeController {
         let daemonsets = self.daemonsets.clone();
         let deployments = self.deployments.clone();
         let etcd_manager = Arc::clone(&self.etcd_manager);
+        let log_notifier = Arc::clone(&self.log_notifier);
 
         tokio::spawn(async move {
             let mut interval = interval(Duration::from_secs(15)); // 更快收敛孤儿
@@ -189,7 +294,12 @@ impl KubeController {
                         match daemonset.check().await {
                             Ok(plan) => {
                                 if !plan.is_empty() {
-                                    KubeController::apply_action_plan(&etcd_manager, plan).await;
+                                    KubeController::apply_action_plan(
+                                        &etcd_manager,
+                                        &log_notifier,
+                                        plan,
+                                    )
+                                    .await;
                                 }
                             }
                             Err(e) => {
@@ -225,7 +335,12 @@ impl KubeController {
                         match deployment.check().await {
                             Ok(plan) => {
                                 if !plan.is_empty() {
-                                    KubeController::apply_action_plan(&etcd_manager, plan).await;
+                                    KubeController::apply_action_plan(
+                                        &etcd_manager,
+                                        &log_notifier,
+                                        plan,
+                                    )
+                                    .await;
                                 }
                             }
                             Err(e) => {
@@ -244,7 +359,11 @@ impl KubeController {
         Ok(())
     }
 
-    async fn apply_action_plan(etcd_manager: &Arc<EtcdManager>, plan: ActorActionPlan) {
+    async fn apply_action_plan(
+        etcd_manager: &Arc<EtcdManager>,
+        log_notifier: &Arc<Mutex<Option<mpsc::Sender<LogCollectorCommand>>>>,
+        plan: ActorActionPlan,
+    ) {
         if plan.is_empty() {
             return;
         }
@@ -260,6 +379,8 @@ impl KubeController {
                 "Applying actor plan: stopping container '{}' (reason: {:?})",
                 action.name, action.reason
             );
+            let notify = vec![action.name.clone()];
+            Self::publish_stop_commands(log_notifier, &notify).await;
             if let Err(e) = crate::agent::general::DockerRunner::stop(&action.name) {
                 warn!(
                     "Failed to stop container {} during plan execution: {}",
@@ -296,6 +417,7 @@ impl KubeController {
         let etcd_manager = Arc::clone(&self.etcd_manager);
         let cluster_name = self.cluster_name.clone();
         let workspace = self.workspace.clone();
+        let log_notifier = Arc::clone(&self.log_notifier);
 
         tokio::spawn(async move {
             use std::collections::HashMap;
@@ -366,6 +488,11 @@ impl KubeController {
                                                 );
                                                 vec![format!("nokube-pod-{}", deployment_name)]
                                             });
+                                            KubeController::publish_follow_commands(
+                                                &log_notifier,
+                                                &container_names,
+                                            )
+                                            .await;
                                             seen_deploy_checksums.insert(
                                                 key_str.clone(),
                                                 (checksum, container_names),
@@ -390,6 +517,11 @@ impl KubeController {
                                         "🔁 Detected deployment update: {} (key={}), restarting",
                                         deployment_name, key_str
                                     );
+                                    KubeController::publish_stop_commands(
+                                        &log_notifier,
+                                        &previous_containers,
+                                    )
+                                    .await;
                                     for container_name in previous_containers {
                                         if let Err(e) = crate::agent::general::DockerRunner::stop(
                                             &container_name,
@@ -445,6 +577,11 @@ impl KubeController {
                                                             deployment_name
                                                         )]
                                                     });
+                                                KubeController::publish_follow_commands(
+                                                    &log_notifier,
+                                                    &container_names,
+                                                )
+                                                .await;
                                                 seen_deploy_checksums.insert(
                                                     key_str.clone(),
                                                     (checksum, container_names),
@@ -475,6 +612,11 @@ impl KubeController {
                                 deployment_name, key
                             );
                             if let Some((_, container_names)) = seen_deploy_checksums.remove(&key) {
+                                KubeController::publish_stop_commands(
+                                    &log_notifier,
+                                    &container_names,
+                                )
+                                .await;
                                 for container_name in container_names {
                                     if let Err(e) =
                                         crate::agent::general::DockerRunner::stop(&container_name)
