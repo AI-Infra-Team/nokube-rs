@@ -3,12 +3,13 @@ use crate::agent::runtime::deployment::{calc_hash_u64, create_deployment_contain
 use crate::config::etcd_manager::EtcdManager;
 use crate::k8s::actors::{DaemonSetActor, DeploymentActor};
 use crate::k8s::the_proxy::ActorAliveRequest;
-use crate::k8s::{ActorKind, ActorOrphanCleanup, ActorState, AsyncActor, GlobalAttributionPath};
+use crate::k8s::{ActorActionPlan, ActorKind, ActorState, AsyncActor, GlobalAttributionPath};
 use anyhow::Result;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
 use tokio::time::{interval, Duration};
+use tracing::{error, info, warn};
 
 /// KubeController - 管理和监控所有k8sActor
 pub struct KubeController {
@@ -156,6 +157,7 @@ impl KubeController {
     async fn start_actor_health_monitor(&self) -> Result<()> {
         let daemonsets = self.daemonsets.clone();
         let deployments = self.deployments.clone();
+        let etcd_manager = Arc::clone(&self.etcd_manager);
 
         tokio::spawn(async move {
             let mut interval = interval(Duration::from_secs(15)); // 更快收敛孤儿
@@ -182,9 +184,19 @@ impl KubeController {
                                 );
                             }
                         }
-                        // 中心调度：指派各 pod 执行必要的孤儿清理
-                        for (_node, pod) in daemonset.pods.iter() {
-                            let _ = pod.cleanup_if_orphaned().await;
+                        match daemonset.check().await {
+                            Ok(plan) => {
+                                if !plan.is_empty() {
+                                    KubeController::apply_action_plan(&etcd_manager, plan).await;
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!(
+                                    "Failed to run check() for DaemonSet {}: {}",
+                                    name,
+                                    e
+                                );
+                            }
                         }
                     }
                 }
@@ -208,9 +220,19 @@ impl KubeController {
                                 );
                             }
                         }
-                        // 中心调度：指派各 pod 执行必要的孤儿清理
-                        for (_pname, pod) in deployment.pods.iter() {
-                            let _ = pod.cleanup_if_orphaned().await;
+                        match deployment.check().await {
+                            Ok(plan) => {
+                                if !plan.is_empty() {
+                                    KubeController::apply_action_plan(&etcd_manager, plan).await;
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!(
+                                    "Failed to run check() for Deployment {}: {}",
+                                    name,
+                                    e
+                                );
+                            }
                         }
                     }
                 }
@@ -218,6 +240,54 @@ impl KubeController {
         });
 
         Ok(())
+    }
+
+    async fn apply_action_plan(etcd_manager: &Arc<EtcdManager>, plan: ActorActionPlan) {
+        if plan.is_empty() {
+            return;
+        }
+
+        let ActorActionPlan {
+            containers_to_stop,
+            etcd_keys_to_delete,
+            signals_to_emit,
+        } = plan;
+
+        for action in containers_to_stop {
+            info!(
+                "Applying actor plan: stopping container '{}' (reason: {:?})",
+                action.name, action.reason
+            );
+            if let Err(e) = crate::agent::general::DockerRunner::stop(&action.name) {
+                warn!(
+                    "Failed to stop container {} during plan execution: {}",
+                    action.name, e
+                );
+            }
+            if let Err(e) = crate::agent::general::DockerRunner::remove_container(&action.name) {
+                warn!(
+                    "Failed to remove container {} during plan execution: {}",
+                    action.name, e
+                );
+            }
+        }
+
+        for key in etcd_keys_to_delete {
+            match etcd_manager.delete(key.clone()).await {
+                Ok(_) => info!("Applying actor plan: deleted etcd key {}", key),
+                Err(e) => warn!(
+                    "Applying actor plan: failed to delete etcd key {}: {}",
+                    key, e
+                ),
+            }
+        }
+
+        for signal in signals_to_emit {
+            info!(
+                "Applying actor plan: signal '{}' for {} (dispatch not yet implemented)",
+                signal.signal, signal.target_path
+            );
+        }
     }
 
     async fn start_object_monitor(&self) -> Result<()> {
@@ -228,7 +298,7 @@ impl KubeController {
         tokio::spawn(async move {
             use std::collections::HashMap;
 
-            let mut interval = interval(Duration::from_secs(30));
+            let mut interval = interval(Duration::from_secs(15));
             let mut seen_deploy_checksums: HashMap<String, u64> = HashMap::new();
             let mut seen_daemon_checksums: HashMap<String, u64> = HashMap::new();
 
@@ -257,7 +327,7 @@ impl KubeController {
 
                         for kv in deployment_kvs {
                             let key_str = String::from_utf8_lossy(&kv.key).to_string();
-                            let value_str = String::from_utf8_lossy(&kv.value);
+                            let value_str = String::from_utf8_lossy(&kv.value).into_owned();
                             let checksum = calc_hash_u64(&value_str);
                             if !seen_deploy_checksums.contains_key(&key_str) {
                                 let deployment_name =
@@ -325,7 +395,35 @@ impl KubeController {
                                             e
                                         );
                                     }
-                                    seen_deploy_checksums.insert(key_str.clone(), checksum);
+                                    match serde_yaml::from_str::<serde_yaml::Value>(&value_str) {
+                                        Ok(deployment_yaml) => {
+                                            let workspace_path = workspace.clone();
+                                            let _ = std::fs::create_dir_all(&workspace_path);
+                                            if let Err(e) = create_deployment_container(
+                                                &deployment_yaml,
+                                                deployment_name,
+                                                &cluster_name,
+                                                &etcd_manager,
+                                                &workspace_path,
+                                            )
+                                            .await
+                                            {
+                                                error!(
+                                                    "Failed to recreate deployment {}: {}",
+                                                    deployment_name, e
+                                                );
+                                            } else {
+                                                seen_deploy_checksums
+                                                    .insert(key_str.clone(), checksum);
+                                            }
+                                        }
+                                        Err(e) => {
+                                            error!(
+                                                "Failed to parse deployment YAML for {}: {}",
+                                                deployment_name, e
+                                            );
+                                        }
+                                    }
                                 }
                             }
                         }

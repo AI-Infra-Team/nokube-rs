@@ -1,7 +1,10 @@
 // Actor 实现 - DaemonSet、Deployment、Pod 等模拟单元
 use crate::config::config_manager::ConfigManager;
 use crate::k8s::the_proxy::ActorAliveRequest;
-use crate::k8s::{ActorKind, ActorOrphanCleanup, ActorState, AsyncActor, GlobalAttributionPath};
+use crate::k8s::{
+    ActorActionPlan, ActorKind, ActorOrphanCleanup, ActorState, AsyncActor, ContainerAction,
+    GlobalAttributionPath,
+};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -667,6 +670,16 @@ impl AsyncActor for DaemonSetActor {
         }
         Ok(true)
     }
+
+    async fn check(&self) -> Result<ActorActionPlan> {
+        let mut plan = ActorActionPlan::default();
+
+        for pod in self.pods.values() {
+            plan.merge(pod.check().await?);
+        }
+
+        Ok(plan)
+    }
 }
 
 impl DaemonSetActor {
@@ -862,6 +875,16 @@ impl AsyncActor for DeploymentActor {
             }
         }
         Ok(true)
+    }
+
+    async fn check(&self) -> Result<ActorActionPlan> {
+        let mut plan = ActorActionPlan::default();
+
+        for pod in self.pods.values() {
+            plan.merge(pod.check().await?);
+        }
+
+        Ok(plan)
     }
 }
 
@@ -1103,57 +1126,46 @@ impl PodActor {
 #[async_trait::async_trait]
 impl ActorOrphanCleanup for PodActor {
     async fn cleanup_if_orphaned(&self) -> anyhow::Result<()> {
-        // 解析父路径，形如 "deployment/<name>"
-        let parent = self.attribution_path.parent();
-        if let Some(p) = parent {
-            let parts: Vec<&str> = p.path.split('/').collect();
-            if parts.len() >= 2 {
-                let actor_type = parts[0];
-                let actor_name = parts[1];
-                let etcd = self.config_manager.get_etcd_manager();
-                // 根据父类型检查 etcd 是否存在
-                let key = match actor_type {
-                    "deployment" => {
-                        format!("/nokube/{}/deployments/{}", self.cluster_name, actor_name)
-                    }
-                    "daemonset" => {
-                        format!("/nokube/{}/daemonsets/{}", self.cluster_name, actor_name)
-                    }
-                    _ => String::new(),
-                };
-                if !key.is_empty() {
-                    match etcd.get(key.clone()).await {
-                        Ok(kvs) if kvs.is_empty() => {
-                            // 父不存在：执行中心调度的清理流程
-                            let container_name = format!("nokube-pod-{}", self.name);
-                            tracing::info!(
-                                "KubeController orphan cleanup: parent missing for pod '{}'(parent={} {}), stopping container '{}'",
-                                self.name, actor_type, actor_name, container_name
-                            );
-                            let _ = crate::agent::general::DockerRunner::stop(&container_name);
-                            let _ = crate::agent::general::DockerRunner::remove_container(
-                                &container_name,
-                            );
-                            // 清理 etcd pod/events
-                            let pod_key =
-                                format!("/nokube/{}/pods/{}", self.cluster_name, self.name);
-                            let _ = etcd.delete(pod_key).await;
-                            let events_key =
-                                format!("/nokube/{}/events/pod/{}", self.cluster_name, self.name);
-                            let _ = etcd.delete(events_key).await;
-                        }
-                        Ok(_) => {}
-                        Err(e) => {
-                            tracing::warn!(
-                                "KubeController orphan cleanup: etcd get {} failed: {}",
-                                key,
-                                e
-                            );
-                        }
-                    }
-                }
+        let plan = AsyncActor::check(self).await?;
+
+        if plan.is_empty() {
+            return Ok(());
+        }
+
+        let etcd = self.config_manager.get_etcd_manager();
+
+        for action in plan.containers_to_stop {
+            tracing::info!(
+                "KubeController orphan cleanup: stopping container '{}' for pod {} (reason: {})",
+                action.name,
+                self.name,
+                action
+                    .reason
+                    .as_deref()
+                    .unwrap_or("plan generated without reason")
+            );
+            let _ = crate::agent::general::DockerRunner::stop(&action.name);
+            let _ = crate::agent::general::DockerRunner::remove_container(&action.name);
+        }
+
+        for key in plan.etcd_keys_to_delete {
+            if let Err(e) = etcd.delete(key.clone()).await {
+                tracing::warn!(
+                    "KubeController orphan cleanup: failed to delete etcd key {}: {}",
+                    key,
+                    e
+                );
             }
         }
+
+        for signal in plan.signals_to_emit {
+            tracing::info!(
+                "KubeController orphan cleanup: pending signal '{}' for {} (not yet implemented)",
+                signal.signal,
+                signal.target_path
+            );
+        }
+
         Ok(())
     }
 }
@@ -1227,6 +1239,63 @@ impl AsyncActor for PodActor {
         }
 
         Ok(false)
+    }
+
+    async fn check(&self) -> Result<ActorActionPlan> {
+        let mut plan = ActorActionPlan::default();
+
+        if let Some(parent) = self.attribution_path.parent() {
+            let parts: Vec<&str> = parent.path.split('/').collect();
+            if parts.len() >= 2 {
+                let actor_type = parts[0];
+                let actor_name = parts[1];
+                let etcd = self.config_manager.get_etcd_manager();
+
+                let etcd_key = match actor_type {
+                    "deployment" => Some(format!(
+                        "/nokube/{}/deployments/{}",
+                        self.cluster_name, actor_name
+                    )),
+                    "daemonset" => Some(format!(
+                        "/nokube/{}/daemonsets/{}",
+                        self.cluster_name, actor_name
+                    )),
+                    _ => None,
+                };
+
+                if let Some(key) = etcd_key {
+                    match etcd.get(key.clone()).await {
+                        Ok(kvs) if kvs.is_empty() => {
+                            let container_name = format!("nokube-pod-{}", self.name);
+                            plan.containers_to_stop.push(ContainerAction {
+                                name: container_name,
+                                reason: Some(format!(
+                                    "parent actor {} missing (etcd key: {})",
+                                    parent.path, key
+                                )),
+                            });
+                            plan.etcd_keys_to_delete
+                                .push(format!("/nokube/{}/pods/{}", self.cluster_name, self.name));
+                            plan.etcd_keys_to_delete.push(format!(
+                                "/nokube/{}/events/pod/{}",
+                                self.cluster_name, self.name
+                            ));
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            tracing::warn!(
+                                "Pod {} check: failed to read parent key {}: {}",
+                                self.name,
+                                key,
+                                e
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(plan)
     }
 }
 

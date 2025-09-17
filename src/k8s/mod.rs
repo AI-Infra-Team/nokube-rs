@@ -45,6 +45,44 @@ impl GlobalAttributionPath {
     }
 }
 
+/// 控制面执行计划 - 描述需要统一执行的治理动作
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ActorActionPlan {
+    pub containers_to_stop: Vec<ContainerAction>,
+    pub etcd_keys_to_delete: Vec<String>,
+    pub signals_to_emit: Vec<ActorSignalAction>,
+}
+
+impl ActorActionPlan {
+    pub fn merge(&mut self, mut other: ActorActionPlan) {
+        self.containers_to_stop
+            .append(&mut other.containers_to_stop);
+        self.etcd_keys_to_delete
+            .append(&mut other.etcd_keys_to_delete);
+        self.signals_to_emit.append(&mut other.signals_to_emit);
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.containers_to_stop.is_empty()
+            && self.etcd_keys_to_delete.is_empty()
+            && self.signals_to_emit.is_empty()
+    }
+}
+
+/// 待统一停止的容器
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContainerAction {
+    pub name: String,
+    pub reason: Option<String>,
+}
+
+/// 需要下发的控制信号
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActorSignalAction {
+    pub target_path: GlobalAttributionPath,
+    pub signal: String,
+}
+
 /// Actor 类型（模拟 K8s 角色）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ActorKind {
@@ -65,6 +103,9 @@ pub trait AsyncActor: Send + Sync {
     async fn stop(&mut self) -> Result<()>;
     async fn update_config(&mut self) -> Result<()>;
     async fn health_check(&self) -> Result<bool>;
+    async fn check(&self) -> Result<ActorActionPlan> {
+        Ok(ActorActionPlan::default())
+    }
 }
 
 /// Actor 状态 - 用于 TheProxy 系统
