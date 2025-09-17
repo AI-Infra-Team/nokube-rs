@@ -1,10 +1,10 @@
-// etcd存储模块 - 专门处理config和secret对象
+// etcd存储模块 - 专门处理config和secretActor
 use crate::config::etcd_manager::EtcdManager;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-/// ConfigMap对象
+/// ConfigMapActor
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConfigMapObject {
     pub name: String,
@@ -13,7 +13,7 @@ pub struct ConfigMapObject {
     pub binary_data: Option<HashMap<String, Vec<u8>>>,
 }
 
-/// Secret对象
+/// SecretActor
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SecretObject {
     pub name: String,
@@ -23,7 +23,7 @@ pub struct SecretObject {
     pub string_data: Option<HashMap<String, String>>, // 原始字符串数据
 }
 
-/// etcd中k8s对象的存储管理器
+/// etcd中k8sActor的存储管理器
 pub struct K8sStorageManager {
     etcd_manager: EtcdManager,
 }

@@ -122,7 +122,7 @@ impl ConfigManager {
         self.etcd_manager.store_cluster_config(config).await
     }
 
-    // K8s对象存储方法
+    // K8sActor存储方法
     pub async fn store_deployment(
         &self,
         cluster_name: &str,

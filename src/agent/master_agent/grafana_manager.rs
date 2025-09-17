@@ -794,7 +794,7 @@ isDefault = true
                             "type": "query",
                             "label": "Namespace",
                             "datasource": "GreptimeDB",
-                            "query": "label_values(nokube_k8s_object_info, namespace)",
+                            "query": "label_values(nokube_actor_info, namespace)",
                             "refresh": 1,
                             "includeAll": true,
                             "allValue": ".*",
@@ -805,9 +805,9 @@ isDefault = true
                             }
                         },
                         {
-                            "name": "object_type",
+                            "name": "actor_kind",
                             "type": "custom",
-                            "label": "Object Type",
+                            "label": "Actor Kind",
                             "options": [
                                 {"text": "All", "value": ".*", "selected": true},
                                 {"text": "DaemonSet", "value": "daemonset", "selected": false},
@@ -828,22 +828,22 @@ isDefault = true
                 "panels": [
                     {
                         "id": 1,
-                        "title": "K8s Objects Overview",
+                        "title": "Actor Overview",
                         "type": "table",
                         "datasource": "GreptimeDB",
                         "targets": [
                             {
-                                "expr": "nokube_k8s_object_info{namespace=~\"$namespace\", object_type=~\"$object_type\"}",
+                                "expr": "nokube_actor_info{namespace=~\"$namespace\", actor_kind=~\"$actor_kind\"}",
                                 "format": "table",
                                 "instant": true
                             }
                         ],
                         "columns": [
                             {"text": "Namespace", "value": "namespace"},
-                            {"text": "Object Type", "value": "object_type"},
-                            {"text": "Name", "value": "object_name"},
+                            {"text": "Actor Kind", "value": "actor_kind"},
+                            {"text": "Name", "value": "actor_name"},
                             {"text": "Status", "value": "status"},
-                            {"text": "Parent", "value": "parent_object"}
+                            {"text": "Parent", "value": "parent_actor"}
                         ],
                         "sort": {
                             "col": 1,
@@ -871,7 +871,7 @@ isDefault = true
                         "datasource": "GreptimeDB",
                         "targets": [
                             {
-                                "expr": "nokube_k8s_pod_status{namespace=~\"$namespace\", parent_daemonset!=\"\"}",
+                                "expr": "nokube_actor_pod_status{namespace=~\"$namespace\", parent_daemonset!=\"\"}",
                                 "legendFormat": "{{parent_daemonset}}/{{pod_name}} - {{status}}",
                                 "intervalFactor": 1,
                                 "step": 30
@@ -951,8 +951,8 @@ isDefault = true
                         "datasource": "GreptimeDB",
                         "targets": [
                             {
-                                "expr": "increase(nokube_k8s_events_total{namespace=~\"$namespace\", object_type=~\"$object_type\"}[5m])",
-                                "legendFormat": "{{event_type}} - {{object_name}}",
+                                "expr": "increase(nokube_actor_events_total{namespace=~\"$namespace\", actor_kind=~\"$actor_kind\"}[5m])",
+                                "legendFormat": "{{event_type}} - {{actor_name}}",
                                 "intervalFactor": 1,
                                 "step": 30
                             }

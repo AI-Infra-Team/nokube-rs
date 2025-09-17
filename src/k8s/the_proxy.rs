@@ -1,7 +1,7 @@
 // the_proxy - 特殊actor协程，一个agent一个，用于聚合所有 k8s actor 的请求
 // 负责校验从属以及管控的actor是否alive，以及keepalive机制
 use crate::config::config_manager::ConfigManager;
-use crate::k8s::{ComponentStatus, GlobalAttributionPath};
+use crate::k8s::{ActorState, GlobalAttributionPath};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -16,7 +16,7 @@ pub struct ActorAliveRequest {
     pub actor_path: GlobalAttributionPath,
     pub actor_type: String, // daemonset, deployment, pod
     pub cluster_name: String,
-    pub status: ComponentStatus,
+    pub status: ActorState,
     pub lease_ttl: u64, // lease过期时间(秒)
 }
 
@@ -34,7 +34,7 @@ struct ActorStatus {
     pub actor_path: GlobalAttributionPath,
     pub actor_type: String,
     pub cluster_name: String,
-    pub status: ComponentStatus,
+    pub status: ActorState,
     pub last_alive: DateTime<Utc>,
     pub lease_id: Option<i64>,
     pub lease_ttl: u64,
@@ -284,14 +284,14 @@ impl TheProxy {
     }
 }
 
-impl ComponentStatus {
+impl ActorState {
     pub fn to_string(&self) -> String {
         match self {
-            ComponentStatus::Starting => "Starting".to_string(),
-            ComponentStatus::Running => "Running".to_string(),
-            ComponentStatus::Stopping => "Stopping".to_string(),
-            ComponentStatus::Stopped => "Stopped".to_string(),
-            ComponentStatus::Failed => "Failed".to_string(),
+            ActorState::Starting => "Starting".to_string(),
+            ActorState::Running => "Running".to_string(),
+            ActorState::Stopping => "Stopping".to_string(),
+            ActorState::Stopped => "Stopped".to_string(),
+            ActorState::Failed => "Failed".to_string(),
         }
     }
 }

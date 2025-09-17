@@ -5,12 +5,11 @@ use crate::agent::general::{
 use crate::config::{
     cluster_config::ClusterConfig, config_manager::ConfigManager, etcd_manager::EtcdManager,
 };
+use crate::k8s::actors::{ContainerSpec, DaemonSetActor, DeploymentActor, NodeAffinity};
 use crate::k8s::controllers::KubeController;
-use crate::k8s::objects::{ContainerSpec, DaemonSetObject, DeploymentObject, NodeAffinity};
 use crate::k8s::the_proxy::TheProxy;
 use crate::k8s::GlobalAttributionPath;
 use anyhow::Result;
-use base64::Engine;
 use std::collections::HashMap;
 use std::process::Command;
 use std::sync::Arc;
@@ -50,8 +49,7 @@ impl ServiceModeAgent {
             5, // 按设计以 5s 间隔刷新保活
         );
 
-        // 初始化KubeController时传入TheProxy的发送端
-        // 使用集群配置中的当前节点 workspace，避免硬编码路径导致挂载校验失败
+        // 初始化KubeController：容器化管理的调度中枢
         let workspace = config
             .nodes
             .iter()
@@ -59,8 +57,13 @@ impl ServiceModeAgent {
             .and_then(|n| n.workspace.clone())
             .unwrap_or_else(|| "/opt/devcon/pa/nokube-workspace".to_string());
         let _ = std::fs::create_dir_all(&workspace);
-        let mut kube_controller = KubeController::new(workspace);
-        kube_controller.proxy_tx = the_proxy.get_alive_sender();
+        let kube_controller = KubeController::new(
+            workspace,
+            cluster_name.clone(),
+            node_id.clone(),
+            Arc::clone(&etcd_manager),
+            the_proxy.get_alive_sender(),
+        );
 
         Ok(Self {
             process_manager: ProcessManager::new(),
@@ -209,8 +212,8 @@ impl ServiceModeAgent {
             warn!("Startup container reconcile failed: {}", e);
         }
 
-        // 从etcd加载k8s对象并应用到KubeController
-        self.load_and_apply_k8s_objects().await?;
+        // 从etcd加载k8sActor并应用到KubeController
+        self.load_and_apply_actor_registry().await?;
 
         self.initialize_exporter().await?;
         if let Some(exporter) = &self.exporter {
@@ -219,9 +222,6 @@ impl ServiceModeAgent {
 
         // 启动监控和服务子进程
         self.start_services().await?;
-
-        // 启动k8s对象监控协程
-        self.start_k8s_object_monitor().await?;
 
         // 持续运行，等待关闭信号
         self.process_manager.wait_for_shutdown_signal().await;
@@ -254,7 +254,10 @@ impl ServiceModeAgent {
                         let key = kv.key_str().to_string();
                         if let Some(name) = key.split('/').last() {
                             let val = String::from_utf8_lossy(&kv.value);
-                            desired.insert(name.to_string(), Self::calc_hash_u64(&val));
+                            desired.insert(
+                                name.to_string(),
+                                crate::agent::runtime::deployment::calc_hash_u64(&val),
+                            );
                         }
                     }
                 }
@@ -562,7 +565,7 @@ providers:
             )?;
         }
 
-        // 启动增强的指标收集进程 - 包含k8s对象指标，并推送到GreptimeDB
+        // 启动增强的指标收集进程 - 包含k8sActor指标，并推送到GreptimeDB
         // 计算 GreptimeDB 基址（基于 head 节点 IP 与配置端口）
         let (greptime_host, greptime_http_port) = if let Some(head_node) = self
             .config
@@ -601,7 +604,7 @@ class NoKubeMetricsCollector:
         self.node_id = node_id
         self.cluster_name = cluster_name
         self.greptime_url = greptime_url.rstrip('/')
-        self.k8s_objects = {{}}
+        self.actor_registry = {{}}
         
     def collect_system_metrics(self):
         """收集系统指标"""
@@ -619,8 +622,8 @@ class NoKubeMetricsCollector:
             'cluster_name': self.cluster_name
         }}
     
-    def collect_k8s_object_metrics(self):
-        """收集k8s对象指标（仅依据实际运行中的容器）"""
+    def collect_actor_metrics(self):
+        """收集 Actor 指标（仅依据实际运行中的容器）"""
         metrics = []
         timestamp = int(time.time())
 
@@ -642,26 +645,26 @@ class NoKubeMetricsCollector:
         except Exception:
             pass
 
-        # 为每个容器推送对象信息和Pod状态
+        # 为每个容器推送Actor信息和Pod状态
         for name, status in running:
-            # 判断对象类型（deployment 或 daemonset）
+            # 判断Actor类型（deployment 或 daemonset）
             actor_name = name[len('nokube-pod-'):]
             is_daemonset = actor_name.endswith('-' + self.node_id)
-            parent_type = 'daemonset' if is_daemonset else 'deployment'
+            parent_kind = 'daemonset' if is_daemonset else 'deployment'
             parent_name = actor_name[:-(len(self.node_id) + 1)] if is_daemonset else actor_name
             obj_status = 'Running' if 'Up' in status else 'Unknown'
 
-            # k8s 对象信息（按pod记录）
+            # k8s Actor信息（按pod记录）
             metrics.append({{
-                'metric_name': 'nokube_k8s_object_info',
+                'metric_name': 'nokube_actor_info',
                 'timestamp': timestamp,
                 'value': 1,
                 'labels': {{
                     'namespace': 'default',
-                    'object_type': 'pod',
-                    'object_name': actor_name,
+                    'actor_kind': 'pod',
+                    'actor_name': actor_name,
                     'status': obj_status,
-                    'parent_object': parent_type + '/' + parent_name,
+                    'parent_actor': parent_kind + '/' + parent_name,
                     'node_id': self.node_id,
                     'cluster_name': self.cluster_name,
                 }}
@@ -669,14 +672,14 @@ class NoKubeMetricsCollector:
 
             # Pod状态（1=Running, 0=非Running）
             metrics.append({{
-                'metric_name': 'nokube_k8s_pod_status',
+                'metric_name': 'nokube_actor_pod_status',
                 'timestamp': timestamp,
                 'value': 1 if 'Up' in status else 0,
                 'labels': {{
                     'namespace': 'default',
                     'pod_name': actor_name,
-                    'parent_daemonset': (parent_type + '/' + parent_name) if parent_type == 'daemonset' else '',
-                    'parent_deployment': (parent_type + '/' + parent_name) if parent_type == 'deployment' else '',
+                    'parent_daemonset': (parent_kind + '/' + parent_name) if parent_kind == 'daemonset' else '',
+                    'parent_deployment': (parent_kind + '/' + parent_name) if parent_kind == 'deployment' else '',
                     'status': obj_status,
                     'node_id': self.node_id,
                     'cluster_name': self.cluster_name,
@@ -785,7 +788,7 @@ class NoKubeMetricsCollector:
                             'labels': {{
                                 'container_name': name,
                                 'namespace': 'default',
-                                'object_type': 'container',
+                                'actor_kind': 'container',
                                 'node_id': self.node_id,
                                 'cluster_name': self.cluster_name,
                             }}
@@ -797,7 +800,7 @@ class NoKubeMetricsCollector:
                             'labels': {{
                                 'container_name': name,
                                 'namespace': 'default',
-                                'object_type': 'container',
+                                'actor_kind': 'container',
                                 'node_id': self.node_id,
                                 'cluster_name': self.cluster_name,
                             }}
@@ -814,7 +817,7 @@ class NoKubeMetricsCollector:
                             'labels': {{
                                 'container_name': name,
                                 'namespace': 'default',
-                                'object_type': 'container',
+                                'actor_kind': 'container',
                                 'node_id': self.node_id,
                                 'cluster_name': self.cluster_name,
                             }}
@@ -873,8 +876,8 @@ class NoKubeMetricsCollector:
                 print("=== System Info ===")
                 print(json.dumps(system_metrics))
                 
-                # 收集k8s对象指标
-                k8s_metrics = self.collect_k8s_object_metrics()
+                # 收集k8sActor指标
+                k8s_metrics = self.collect_actor_metrics()
                 print("=== K8s Objects ===")
                 for metric in k8s_metrics:
                     print(json.dumps(metric))
@@ -985,11 +988,11 @@ if __name__ == "__main__":
         Ok(())
     }
 
-    /// 从etcd加载k8s对象并应用到KubeController
-    async fn load_and_apply_k8s_objects(&mut self) -> Result<()> {
-        info!("Loading k8s objects from etcd...");
+    /// 从etcd加载k8sActor并应用到KubeController
+    async fn load_and_apply_actor_registry(&mut self) -> Result<()> {
+        info!("Loading actors from etcd...");
 
-        // 首先收集所有需要创建的对象
+        // 首先收集所有需要创建的Actor
         let mut deployments_to_create = Vec::new();
         let mut daemonsets_to_create = Vec::new();
 
@@ -1057,7 +1060,7 @@ if __name__ == "__main__":
             }
         }
 
-        // 现在创建所有对象
+        // 现在创建所有Actor
         for (deployment_yaml, deployment_name) in deployments_to_create {
             info!("Processing deployment: {}", deployment_name);
             if let Err(e) = self
@@ -1078,11 +1081,11 @@ if __name__ == "__main__":
             }
         }
 
-        info!("Completed loading k8s objects from etcd");
+        info!("Completed loading actors from etcd");
         Ok(())
     }
 
-    /// 创建Deployment对象 - 使用统一的容器创建方法
+    /// 创建DeploymentActor - 使用统一的容器创建方法
     async fn create_deployment_from_yaml(
         &mut self,
         deployment_yaml: serde_yaml::Value,
@@ -1103,7 +1106,7 @@ if __name__ == "__main__":
             .unwrap_or_else(|| "/opt/devcon/pa/nokube-workspace".to_string());
         let _ = std::fs::create_dir_all(&workspace);
 
-        match Self::create_deployment_container_unified(
+        match crate::agent::runtime::deployment::create_deployment_container(
             &deployment_yaml,
             deployment_name,
             &self.cluster_name,
@@ -1133,7 +1136,7 @@ if __name__ == "__main__":
                     }
                 }
 
-                // TODO: 如果需要K8s对象管理，可以在这里添加
+                // TODO: 如果需要K8sActor管理，可以在这里添加
                 // 目前重点是确保容器能正确启动并挂载ConfigMap
             }
             Err(e) => {
@@ -1144,7 +1147,7 @@ if __name__ == "__main__":
         Ok(())
     }
 
-    /// 创建DaemonSet对象
+    /// 创建DaemonSetActor
     async fn create_daemonset_from_yaml(
         &mut self,
         daemonset_yaml: serde_yaml::Value,
@@ -1234,7 +1237,7 @@ if __name__ == "__main__":
                     let proxy_tx = kube_controller.proxy_tx.clone();
                     // Clone spec for daemonset object; keep local for env injection below
                     let ds_container_spec = container_spec.clone();
-                    let daemonset_obj = DaemonSetObject::new(
+                    let daemonset_obj = DaemonSetActor::new(
                         daemonset_name.to_string(),
                         "default".to_string(),
                         attribution_path,
@@ -1327,7 +1330,7 @@ if __name__ == "__main__":
                 "pod_ip": if status == "Running" { serde_json::Value::String("172.17.0.5".to_string()) } else { serde_json::Value::Null },
                 "labels": {
                     "app": pod_name,
-                    "component": "pod"
+                    "role": "pod"
                 },
                 "ports": ["8080/TCP"],
                 "priority": 0
@@ -1434,937 +1437,5 @@ if __name__ == "__main__":
         }
 
         Ok(())
-    }
-
-    /// 启动k8s对象监控协程
-    async fn start_k8s_object_monitor(&mut self) -> Result<()> {
-        if let Some(etcd_manager) = &self.etcd_manager {
-            use std::collections::HashSet;
-
-            let etcd_manager_clone = Arc::clone(etcd_manager);
-            let cluster_name = self.cluster_name.clone();
-            let _log_collector_clone = if let Some(ref log_collector) = self.log_collector {
-                Some(log_collector.get_log_sender())
-            } else {
-                None
-            };
-
-            tokio::spawn(async move {
-                use std::collections::HashMap;
-                let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
-                let mut seen_deploy_checksums: HashMap<String, u64> = HashMap::new();
-                let mut seen_daemon_checksums: HashMap<String, u64> = HashMap::new();
-
-                loop {
-                    interval.tick().await;
-                    info!(
-                        "Checking for new deployments/daemonsets in cluster: {}",
-                        cluster_name
-                    );
-
-                    // 检查 deployments
-                    let deployment_prefix = format!("/nokube/{}/deployments/", cluster_name);
-                    match etcd_manager_clone
-                        .get_prefix(deployment_prefix.clone())
-                        .await
-                    {
-                        Ok(deployment_kvs) => {
-                            info!(
-                                "Deployment monitor: total keys={} (seen={})",
-                                deployment_kvs.len(),
-                                seen_deploy_checksums.len()
-                            );
-                            // 收集当前存在的 deployment 及其校验和
-                            let mut current_map: HashMap<String, u64> = HashMap::new();
-                            for kv in &deployment_kvs {
-                                let key = String::from_utf8_lossy(&kv.key).to_string();
-                                let val = String::from_utf8_lossy(&kv.value);
-                                let csum = Self::calc_hash_u64(&val);
-                                current_map.insert(key, csum);
-                            }
-
-                            // 处理新增的 deployments
-                            for kv in deployment_kvs {
-                                let key_str = String::from_utf8_lossy(&kv.key).to_string();
-                                let value_str = String::from_utf8_lossy(&kv.value);
-                                let checksum = Self::calc_hash_u64(&value_str);
-                                if !seen_deploy_checksums.contains_key(&key_str) {
-                                    let deployment_name =
-                                        key_str.split('/').last().unwrap_or("unknown");
-                                    match serde_yaml::from_str::<serde_yaml::Value>(&value_str) {
-                                        Ok(deployment_yaml) => {
-                                            info!(
-                                                "Processing new deployment: {} (key={})",
-                                                deployment_name, key_str
-                                            );
-                                            // 计算当前节点的工作目录以挂载（避免校验失败）
-                                            let workspace = if let Ok(cfg_mgr) =
-                                                ConfigManager::new().await
-                                            {
-                                                if let Ok(Some(cfg)) =
-                                                    cfg_mgr.get_cluster_config(&cluster_name).await
-                                                {
-                                                    // 优先使用 Head 节点 workspace，其次用第一个节点 workspace，最后回退默认路径
-                                                    if let Some(head) = cfg.nodes.iter().find(|n| matches!(n.role, crate::config::cluster_config::NodeRole::Head)) {
-                                                        head.workspace.clone().unwrap_or_else(|| "/opt/devcon/pa/nokube-workspace".to_string())
-                                                    } else {
-                                                        cfg.nodes
-                                                            .first()
-                                                            .and_then(|n| n.workspace.clone())
-                                                            .unwrap_or_else(|| "/opt/devcon/pa/nokube-workspace".to_string())
-                                                    }
-                                                } else {
-                                                    "/opt/devcon/pa/nokube-workspace".to_string()
-                                                }
-                                            } else {
-                                                "/opt/devcon/pa/nokube-workspace".to_string()
-                                            };
-                                            let _ = std::fs::create_dir_all(&workspace);
-
-                                            if let Err(e) =
-                                                Self::create_deployment_container_unified(
-                                                    &deployment_yaml,
-                                                    deployment_name,
-                                                    &cluster_name,
-                                                    &etcd_manager_clone,
-                                                    &workspace,
-                                                )
-                                                .await
-                                            {
-                                                error!(
-                                                    "Failed to create deployment {}: {}",
-                                                    deployment_name, e
-                                                );
-                                            } else {
-                                                seen_deploy_checksums.insert(key_str, checksum);
-                                            }
-                                        }
-                                        Err(e) => {
-                                            error!(
-                                                "Failed to parse deployment YAML for {}: {}",
-                                                deployment_name, e
-                                            );
-                                        }
-                                    }
-                                } else {
-                                    // 已存在：检查校验和是否变化
-                                    if let Some(prev) = seen_deploy_checksums.get(&key_str) {
-                                        if *prev != checksum {
-                                            let deployment_name =
-                                                key_str.split('/').last().unwrap_or("unknown");
-                                            info!("🔁 Detected deployment update: {} (key={}), restarting", deployment_name, key_str);
-                                            let container_name =
-                                                format!("nokube-pod-{}", deployment_name);
-                                            // 停旧容器
-                                            if let Err(e) =
-                                                crate::agent::general::DockerRunner::stop(
-                                                    &container_name,
-                                                )
-                                            {
-                                                tracing::warn!(
-                                                    "Failed to stop container {}: {}",
-                                                    container_name,
-                                                    e
-                                                );
-                                            }
-                                            if let Err(e) = crate::agent::general::DockerRunner::remove_container(&container_name) {
-                                                tracing::warn!("Failed to remove container {}: {}", container_name, e);
-                                            }
-                                            // 重建
-                                            match serde_yaml::from_str::<serde_yaml::Value>(
-                                                &value_str,
-                                            ) {
-                                                Ok(deployment_yaml) => {
-                                                    // 计算当前节点的工作目录
-                                                    let workspace = if let Ok(cfg_mgr) =
-                                                        ConfigManager::new().await
-                                                    {
-                                                        if let Ok(Some(cfg)) = cfg_mgr
-                                                            .get_cluster_config(&cluster_name)
-                                                            .await
-                                                        {
-                                                            if let Some(head) = cfg.nodes.iter().find(|n| matches!(n.role, crate::config::cluster_config::NodeRole::Head)) {
-                                                                head.workspace.clone().unwrap_or_else(|| "/opt/devcon/pa/nokube-workspace".to_string())
-                                                            } else {
-                                                                cfg.nodes.first().and_then(|n| n.workspace.clone()).unwrap_or_else(|| "/opt/devcon/pa/nokube-workspace".to_string())
-                                                            }
-                                                        } else {
-                                                            "/opt/devcon/pa/nokube-workspace"
-                                                                .to_string()
-                                                        }
-                                                    } else {
-                                                        "/opt/devcon/pa/nokube-workspace"
-                                                            .to_string()
-                                                    };
-                                                    let _ = std::fs::create_dir_all(&workspace);
-                                                    if let Err(e) =
-                                                        Self::create_deployment_container_unified(
-                                                            &deployment_yaml,
-                                                            deployment_name,
-                                                            &cluster_name,
-                                                            &etcd_manager_clone,
-                                                            &workspace,
-                                                        )
-                                                        .await
-                                                    {
-                                                        error!(
-                                                            "Failed to recreate deployment {}: {}",
-                                                            deployment_name, e
-                                                        );
-                                                    } else {
-                                                        seen_deploy_checksums
-                                                            .insert(key_str.clone(), checksum);
-                                                    }
-                                                }
-                                                Err(e) => {
-                                                    error!("Failed to parse updated deployment YAML for {}: {}", deployment_name, e);
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-
-                            // 处理已删除的 deployments：具体销毁交由 KubeController 的孤儿回收调度。
-
-                            // 用当前 map 覆盖已见集合，保持与etcd一致
-                            seen_deploy_checksums = current_map;
-                        }
-                        Err(e) => {
-                            warn!("Failed to check deployments: {}", e);
-                        }
-                    }
-
-                    // 检查 daemonsets
-                    let daemonset_prefix = format!("/nokube/{}/daemonsets/", cluster_name);
-                    match etcd_manager_clone.get_prefix(daemonset_prefix).await {
-                        Ok(daemonset_kvs) => {
-                            info!(
-                                "DaemonSet monitor: total keys={} (seen={})",
-                                daemonset_kvs.len(),
-                                seen_daemon_checksums.len()
-                            );
-                            // 构建当前 map
-                            let mut current_map: HashMap<String, u64> = HashMap::new();
-                            for kv in &daemonset_kvs {
-                                let key = String::from_utf8_lossy(&kv.key).to_string();
-                                let val = String::from_utf8_lossy(&kv.value);
-                                current_map.insert(key, Self::calc_hash_u64(&val));
-                            }
-                            for kv in daemonset_kvs {
-                                let key_str = String::from_utf8_lossy(&kv.key).to_string();
-                                let val = String::from_utf8_lossy(&kv.value);
-                                let checksum = Self::calc_hash_u64(&val);
-                                if !seen_daemon_checksums.contains_key(&key_str) {
-                                    let daemonset_name =
-                                        key_str.split('/').last().unwrap_or("unknown");
-                                    match serde_yaml::from_str::<serde_yaml::Value>(&val) {
-                                        Ok(daemonset_yaml) => {
-                                            info!(
-                                                "Processing new daemonset: {} (key={})",
-                                                daemonset_name, key_str
-                                            );
-                                            // 后续可添加统一创建逻辑（目前仅记录校验和）
-                                            seen_daemon_checksums.insert(key_str, checksum);
-                                        }
-                                        Err(e) => {
-                                            error!(
-                                                "Failed to parse daemonset YAML for {}: {}",
-                                                daemonset_name, e
-                                            );
-                                        }
-                                    }
-                                } else {
-                                    // update 检测占位（若需要同部署一样重启）
-                                    if let Some(prev) = seen_daemon_checksums.get(&key_str) {
-                                        if *prev != checksum {
-                                            let daemonset_name =
-                                                key_str.split('/').last().unwrap_or("unknown");
-                                            info!("🔁 Detected daemonset update: {} (key={}), will recreate local ds container", daemonset_name, key_str);
-                                            let ds_container_name = format!(
-                                                "nokube-pod-{}-{}",
-                                                daemonset_name, "${NODE}"
-                                            );
-                                            // 由于当前节点名不可用于此处（闭包内），仅更新校验和，实际容器重建在 create_daemonset_from_yaml 中处理
-                                            seen_daemon_checksums.insert(key_str.clone(), checksum);
-                                        }
-                                    }
-                                }
-                            }
-                            // 移除检测
-                            let removed: Vec<String> = seen_daemon_checksums
-                                .keys()
-                                .filter(|k| !current_map.contains_key(*k))
-                                .cloned()
-                                .collect();
-                            for key in removed {
-                                seen_daemon_checksums.remove(&key);
-                            }
-                        }
-                        Err(e) => {
-                            warn!("Failed to check daemonsets: {}", e);
-                        }
-                    }
-                }
-            });
-        }
-        Ok(())
-    }
-
-    /// 计算简单的稳定哈希（用于 YAML 变更检测）
-    fn calc_hash_u64(s: &str) -> u64 {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-        let mut hasher = DefaultHasher::new();
-        s.hash(&mut hasher);
-        hasher.finish()
-    }
-
-    /// 统一的deployment容器创建方法 - 使用最新的DockerRunner
-    async fn create_deployment_container_unified(
-        deployment_yaml: &serde_yaml::Value,
-        deployment_name: &str,
-        cluster_name: &str,
-        etcd_manager: &Arc<EtcdManager>,
-        workspace: &str,
-    ) -> Result<()> {
-        info!(
-            "Creating deployment container (unified): {}",
-            deployment_name
-        );
-
-        // 解析deployment配置
-        let spec = deployment_yaml
-            .get("spec")
-            .ok_or_else(|| anyhow::anyhow!("Missing spec in deployment"))?;
-
-        // Debug: 打印整个YAML结构
-        info!(
-            "🔍 Debug: Full YAML structure: {}",
-            serde_json::to_string_pretty(&deployment_yaml)
-                .unwrap_or_else(|_| "Failed to serialize".to_string())
-        );
-        info!(
-            "🔍 Debug: Spec keys: {:?}",
-            spec.as_mapping().map(|m| m.keys().collect::<Vec<_>>())
-        );
-
-        if let Some(template) = spec.get("template") {
-            info!(
-                "🔍 Debug: Template found, keys: {:?}",
-                template.as_mapping().map(|m| m.keys().collect::<Vec<_>>())
-            );
-        }
-
-        // 检查是否是GitOps类型的部署 (包含configMap字段)
-        let configmap_data = spec.get("configMap").and_then(|cm| cm.get("data"));
-
-        // 解析spec结构 - 区分标准K8s Deployment和GitOpsCluster格式
-        let deployment_spec = if spec.get("template").is_some() {
-            // 标准Kubernetes Deployment格式: 直接使用spec
-            info!("🎯 Processing standard K8s Deployment format");
-            spec
-        } else if let Some(deploy) = spec.get("deployment") {
-            // GitOpsCluster格式: deployment
-            info!("🎯 Processing GitOpsCluster deployment format");
-            deploy
-        } else {
-            return Err(anyhow::anyhow!("Missing template or deployment in spec"));
-        };
-
-        // 提取containerSpec - 需要支持多种YAML格式
-        let container_spec = if let Some(template) = deployment_spec.get("template") {
-            // 标准Kubernetes格式: template.spec.containers[0]
-            if let Some(template_spec) = template.get("spec") {
-                if let Some(containers) = template_spec
-                    .get("containers")
-                    .and_then(|c| c.as_sequence())
-                {
-                    containers
-                        .first()
-                        .ok_or_else(|| anyhow::anyhow!("Empty containers array in template.spec"))?
-                } else {
-                    return Err(anyhow::anyhow!("Missing containers in template.spec"));
-                }
-            }
-            // NoKube自定义格式: template.containerSpec
-            else if let Some(container_spec) = template.get("containerSpec") {
-                container_spec
-            } else {
-                return Err(anyhow::anyhow!(
-                    "Missing containerSpec or spec.containers in template"
-                ));
-            }
-        } else {
-            // 直接在deployment_spec下查找containerSpec
-            deployment_spec
-                .get("containerSpec")
-                .ok_or_else(|| anyhow::anyhow!("Missing containerSpec in deployment"))?
-        };
-
-        let image = container_spec
-            .get("image")
-            .and_then(|v| v.as_str())
-            .unwrap_or("python:3.10-slim");
-
-        // 提取command和args
-        let command: Option<Vec<String>> = container_spec
-            .get("command")
-            .and_then(|v| v.as_sequence())
-            .map(|seq| {
-                seq.iter()
-                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                    .collect()
-            });
-        let args: Option<Vec<String>> = container_spec
-            .get("args")
-            .and_then(|v| v.as_sequence())
-            .map(|seq| {
-                seq.iter()
-                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                    .collect()
-            });
-
-        // 提取环境变量 - 支持多种格式
-        let mut env = HashMap::new();
-        if let Some(env_obj) = container_spec.get("env") {
-            // Kubernetes格式: 直接是对象 {"KEY": "VALUE"}
-            if let Some(env_map) = env_obj.as_mapping() {
-                for (k, v) in env_map {
-                    if let (Some(key), Some(value)) = (k.as_str(), v.as_str()) {
-                        env.insert(key.to_string(), value.to_string());
-                    }
-                }
-            }
-            // Kubernetes标准格式: 数组 [{"name": "KEY", "value": "VALUE"}]
-            else if let Some(env_array) = env_obj.as_sequence() {
-                for env_item in env_array {
-                    if let (Some(name), Some(value)) = (
-                        env_item.get("name").and_then(|v| v.as_str()),
-                        env_item.get("value").and_then(|v| v.as_str()),
-                    ) {
-                        env.insert(name.to_string(), value.to_string());
-                    }
-                }
-            }
-        }
-
-        // 创建Docker容器使用新的DockerRunner
-        let container_name = format!("nokube-pod-{}", deployment_name);
-        let workspace = workspace.to_string();
-
-        // 使用新的 DockerRunConfig 构建配置
-        let mut config = DockerRunConfig::new(container_name.clone(), image.to_string());
-
-        // 添加基础挂载
-        config = config.add_volume(workspace.clone(), "/pod-workspace".to_string(), false);
-
-        // 不再处理volumeMounts - 所有volume挂载由下面的标准K8s volumes处理逻辑统一处理
-        // 这避免了重复挂载同一路径的问题
-
-        // 旧的自定义configMap处理已移除，现在统一使用标准Kubernetes volumes处理
-
-        // 跟踪已使用的挂载路径，防止重复挂载
-        let mut used_mount_paths = std::collections::HashSet::new();
-
-        // 处理标准Kubernetes volumes定义 (支持标准K8s Deployment格式)
-        if let Some(template) = deployment_spec.get("template") {
-            if let Some(template_spec) = template.get("spec") {
-                if let Some(volumes) = template_spec.get("volumes").and_then(|v| v.as_sequence()) {
-                    info!("🔍 Processing {} standard K8s volumes", volumes.len());
-
-                    for volume in volumes {
-                        if let Some(volume_name) = volume.get("name").and_then(|n| n.as_str()) {
-                            // 处理ConfigMap类型的volume
-                            if let Some(configmap_ref) = volume.get("configMap") {
-                                if let Some(configmap_name) =
-                                    configmap_ref.get("name").and_then(|n| n.as_str())
-                                {
-                                    info!(
-                                        "📦 Processing ConfigMap volume: {} -> {}",
-                                        volume_name, configmap_name
-                                    );
-
-                                    // 创建ConfigMap目录（即使未找到数据也创建空目录并挂载）
-                                    let volume_config_dir =
-                                        format!("{}/configmaps/{}", workspace, configmap_name);
-                                    std::fs::create_dir_all(&volume_config_dir).map_err(|e| {
-                                        anyhow::anyhow!(
-                                            "Failed to create ConfigMap volume directory {}: {}",
-                                            volume_config_dir,
-                                            e
-                                        )
-                                    })?;
-                                    info!(
-                                        "📁 Prepared ConfigMap volume directory: {}",
-                                        volume_config_dir
-                                    );
-
-                                    // 尝试从etcd加载ConfigMap数据并写入文件
-                                    match Self::load_configmap_from_etcd(
-                                        etcd_manager,
-                                        cluster_name,
-                                        configmap_name,
-                                    )
-                                    .await
-                                    {
-                                        Ok(Some(configmap_data)) => {
-                                            if let Some(data_map) = configmap_data.as_mapping() {
-                                                info!(
-                                                    "📝 ConfigMap '{}' has {} entries",
-                                                    configmap_name,
-                                                    data_map.len()
-                                                );
-                                                for (filename, content) in data_map {
-                                                    if let Some(name) = filename.as_str() {
-                                                        if let Some(data) = content.as_str() {
-                                                            let file_path = format!(
-                                                                "{}/{}",
-                                                                volume_config_dir, name
-                                                            );
-                                                            std::fs::write(&file_path, data).map_err(|e| {
-                                                                anyhow::anyhow!("Failed to write ConfigMap volume file {}: {}", file_path, e)
-                                                            })?;
-                                                            info!("✅ Created ConfigMap volume file: {} ({} bytes)", file_path, data.len());
-                                                        } else {
-                                                            warn!("⚠️  ConfigMap file '{}' content is not a string: {:?}", name, content);
-                                                        }
-                                                    } else {
-                                                        warn!("⚠️  ConfigMap filename is not a string: {:?}", filename);
-                                                    }
-                                                }
-                                            } else {
-                                                warn!("⚠️  ConfigMap '{}' data is not a mapping: {:?}", configmap_name, configmap_data);
-                                            }
-                                        }
-                                        Ok(None) => {
-                                            warn!("⚠️  ConfigMap '{}' not found in etcd, mounting empty directory", configmap_name);
-                                        }
-                                        Err(e) => {
-                                            error!(
-                                                "❌ Failed to load ConfigMap '{}' from etcd: {}",
-                                                configmap_name, e
-                                            );
-                                            // 继续挂载空目录
-                                        }
-                                    }
-
-                                    // 找到对应的volumeMount并添加到Docker配置（即使没有数据也挂载空目录）
-                                    if let Some(volume_mounts) = container_spec
-                                        .get("volumeMounts")
-                                        .and_then(|vm| vm.as_sequence())
-                                    {
-                                        for volume_mount in volume_mounts {
-                                            if let (Some(mount_name), Some(mount_path)) = (
-                                                volume_mount.get("name").and_then(|v| v.as_str()),
-                                                volume_mount
-                                                    .get("mountPath")
-                                                    .and_then(|v| v.as_str()),
-                                            ) {
-                                                if mount_name == volume_name {
-                                                    if used_mount_paths.contains(mount_path) {
-                                                        warn!("⚠️  Skipping duplicate mount to path '{}' for volume '{}'", mount_path, volume_name);
-                                                        continue;
-                                                    }
-                                                    let read_only = volume_mount
-                                                        .get("readOnly")
-                                                        .and_then(|v| v.as_bool())
-                                                        .unwrap_or(false);
-                                                    config = config.add_volume(
-                                                        volume_config_dir.clone(),
-                                                        mount_path.to_string(),
-                                                        read_only,
-                                                    );
-                                                    used_mount_paths.insert(mount_path.to_string());
-                                                    info!("🔗 Added standard K8s volume mount: {} -> {} (readonly: {})", volume_config_dir, mount_path, read_only);
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            // 处理Secret类型的volume
-                            else if let Some(secret_ref) = volume.get("secret") {
-                                if let Some(secret_name) = secret_ref
-                                    .get("secretName")
-                                    .and_then(|n| n.as_str())
-                                    .or_else(|| secret_ref.get("name").and_then(|n| n.as_str()))
-                                {
-                                    info!(
-                                        "🔐 Processing Secret volume: {} -> {}",
-                                        volume_name, secret_name
-                                    );
-
-                                    // 准备Secret目录
-                                    let volume_secret_dir =
-                                        format!("{}/secrets/{}", workspace, secret_name);
-                                    std::fs::create_dir_all(&volume_secret_dir).map_err(|e| {
-                                        anyhow::anyhow!(
-                                            "Failed to create Secret volume directory {}: {}",
-                                            volume_secret_dir,
-                                            e
-                                        )
-                                    })?;
-                                    info!(
-                                        "📁 Prepared Secret volume directory: {}",
-                                        volume_secret_dir
-                                    );
-
-                                    // 加载Secret数据
-                                    match Self::load_secret_from_etcd(
-                                        etcd_manager,
-                                        cluster_name,
-                                        secret_name,
-                                    )
-                                    .await
-                                    {
-                                        Ok(Some(secret_data)) => {
-                                            if let Some(data_map) = secret_data.as_mapping() {
-                                                info!(
-                                                    "📝 Secret '{}' has {} entries",
-                                                    secret_name,
-                                                    data_map.len()
-                                                );
-                                                for (filename, content) in data_map {
-                                                    if let Some(name) = filename.as_str() {
-                                                        if let Some(data) = content.as_str() {
-                                                            // 尝试base64解码，否则按原文写入
-                                                            let decoded = base64::engine::general_purpose::STANDARD.decode(data.as_bytes())
-                                                                .ok()
-                                                                .and_then(|bytes| String::from_utf8(bytes).ok())
-                                                                .unwrap_or_else(|| data.to_string());
-                                                            let file_path = format!(
-                                                                "{}/{}",
-                                                                volume_secret_dir, name
-                                                            );
-                                                            std::fs::write(&file_path, decoded).map_err(|e| {
-                                                                anyhow::anyhow!("Failed to write Secret volume file {}: {}", file_path, e)
-                                                            })?;
-                                                            info!(
-                                                                "✅ Created Secret volume file: {}",
-                                                                file_path
-                                                            );
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        Ok(None) => {
-                                            warn!("⚠️  Secret '{}' not found in etcd, mounting empty directory", secret_name);
-                                        }
-                                        Err(e) => {
-                                            error!(
-                                                "❌ Failed to load Secret '{}' from etcd: {}",
-                                                secret_name, e
-                                            );
-                                        }
-                                    }
-
-                                    // 添加对应的挂载
-                                    if let Some(volume_mounts) = container_spec
-                                        .get("volumeMounts")
-                                        .and_then(|vm| vm.as_sequence())
-                                    {
-                                        for volume_mount in volume_mounts {
-                                            if let (Some(mount_name), Some(mount_path)) = (
-                                                volume_mount.get("name").and_then(|v| v.as_str()),
-                                                volume_mount
-                                                    .get("mountPath")
-                                                    .and_then(|v| v.as_str()),
-                                            ) {
-                                                if mount_name == volume_name {
-                                                    if used_mount_paths.contains(mount_path) {
-                                                        warn!("⚠️  Skipping duplicate mount to path '{}' for volume '{}'", mount_path, volume_name);
-                                                        continue;
-                                                    }
-                                                    let read_only = volume_mount
-                                                        .get("readOnly")
-                                                        .and_then(|v| v.as_bool())
-                                                        .unwrap_or(true);
-                                                    config = config.add_volume(
-                                                        volume_secret_dir.clone(),
-                                                        mount_path.to_string(),
-                                                        read_only,
-                                                    );
-                                                    used_mount_paths.insert(mount_path.to_string());
-                                                    info!("🔗 Added Secret volume mount: {} -> {} (readonly: {})", volume_secret_dir, mount_path, read_only);
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    info!("✅ Standard K8s volumes processing completed");
-                }
-            }
-        }
-
-        // 添加环境变量
-        for (key, value) in env.iter() {
-            config = config.add_env(key.clone(), value.clone());
-        }
-
-        // 传递代理环境变量（若存在且未在容器env中覆盖）
-        let proxy_keys = [
-            "http_proxy",
-            "https_proxy",
-            "no_proxy",
-            "HTTP_PROXY",
-            "HTTPS_PROXY",
-            "NO_PROXY",
-        ];
-        for key in proxy_keys {
-            if !env.contains_key(key) {
-                if let Ok(val) = std::env::var(key) {
-                    if !val.is_empty() {
-                        config = config.add_env(key.to_string(), val);
-                    }
-                }
-            }
-        }
-
-        // 设置重启策略
-        config = config.restart_policy("unless-stopped".to_string());
-
-        // 准备容器启动后执行的命令
-        let mut container_command = Vec::new();
-        if let Some(cmd) = command.as_ref() {
-            container_command.extend(cmd.iter().cloned());
-        }
-        if let Some(args) = args.as_ref() {
-            container_command.extend(args.iter().cloned());
-        }
-
-        if !container_command.is_empty() {
-            config = config.command(container_command);
-        }
-
-        info!(
-            "Docker config prepared: name={}, image={}, volumes={}, env={:?}, cmd={:?}",
-            container_name,
-            image,
-            config.volumes.len(),
-            env.keys().collect::<Vec<_>>(),
-            config.command
-        );
-
-        // 打印将要执行的Docker命令供调试
-        let docker_cmd_preview = format!(
-            "docker run --name {} {} {} {} {}",
-            container_name,
-            config
-                .volumes
-                .iter()
-                .map(|vol| format!("-v {}", vol.to_docker_arg()))
-                .collect::<Vec<_>>()
-                .join(" "),
-            config
-                .environment
-                .iter()
-                .map(|(k, v)| format!("-e {}={}", k, v))
-                .collect::<Vec<_>>()
-                .join(" "),
-            if let Some(ref restart) = config.restart_policy {
-                format!("--restart {}", restart)
-            } else {
-                String::new()
-            },
-            image
-        );
-        info!("🐳 Docker command preview: {}", docker_cmd_preview);
-
-        // 附加容器标签：记录当前 YAML 校验和，便于调试与配置对账
-        let yaml_text = serde_yaml::to_string(deployment_yaml).unwrap_or_default();
-        let checksum = Self::calc_hash_u64(&yaml_text);
-        config.extra_args.push("--label".to_string());
-        config
-            .extra_args
-            .push(format!("nokube.actor.checksum={}", checksum));
-
-        // 使用 DockerRunner 创建容器
-        match DockerRunner::run(&config) {
-            Ok(container_id) => {
-                info!(
-                    "Created Docker container: {} with ID: {}",
-                    container_name, container_id
-                );
-
-                // 存储成功状态到etcd
-                Self::store_pod_status_static(
-                    etcd_manager,
-                    cluster_name,
-                    deployment_name,
-                    "Running",
-                    None,
-                )
-                .await?;
-            }
-            Err(e) => {
-                error!("Failed to create deployment {}: {}", deployment_name, e);
-
-                // 存储失败状态和错误信息到etcd
-                Self::store_pod_status_static(
-                    etcd_manager,
-                    cluster_name,
-                    deployment_name,
-                    "Failed",
-                    Some(&format!("{}", e)),
-                )
-                .await?;
-            }
-        }
-
-        Ok(())
-    }
-    /// 静态方法：存储pod状态到etcd
-    async fn store_pod_status_static(
-        etcd_manager: &Arc<EtcdManager>,
-        cluster_name: &str,
-        pod_name: &str,
-        status: &str,
-        error_message: Option<&str>,
-    ) -> anyhow::Result<()> {
-        let pod_key = format!("/nokube/{}/pods/{}", cluster_name, pod_name);
-
-        let mut pod_info = serde_json::json!({
-            "name": pod_name,
-            "namespace": "default",
-            "node": "agent-node",
-            "image": "python:3.10-slim",
-            "container_id": serde_json::Value::Null,
-            "status": status,
-            "ready": status == "Running",
-            "restart_count": 0,
-            "start_time": chrono::Utc::now().to_rfc3339(),
-            "pod_ip": if status == "Running" { serde_json::Value::String("172.17.0.5".to_string()) } else { serde_json::Value::Null },
-            "labels": {
-                "app": pod_name,
-                "component": "pod"
-            },
-            "ports": ["8080/TCP"],
-            "priority": 0
-        });
-
-        // 如果有错误信息，添加到pod信息中
-        if let Some(error) = error_message {
-            pod_info["error_message"] = serde_json::Value::String(error.to_string());
-        }
-
-        etcd_manager.put(pod_key, pod_info.to_string()).await?;
-        Ok(())
-    }
-
-    /// 从etcd加载ConfigMap数据
-    async fn load_configmap_from_etcd(
-        etcd_manager: &Arc<EtcdManager>,
-        cluster_name: &str,
-        configmap_name: &str,
-    ) -> Result<Option<serde_yaml::Value>> {
-        let configmap_key = format!("/nokube/{}/configmaps/{}", cluster_name, configmap_name);
-
-        match etcd_manager.get(configmap_key.clone()).await {
-            Ok(kvs) if !kvs.is_empty() => {
-                let configmap_yaml = String::from_utf8_lossy(&kvs[0].value);
-                info!(
-                    "🔍 Loading ConfigMap '{}' from etcd: {} bytes",
-                    configmap_name,
-                    configmap_yaml.len()
-                );
-
-                // 解析YAML以获取ConfigMap数据
-                match serde_yaml::from_str::<serde_yaml::Value>(&configmap_yaml) {
-                    Ok(configmap_obj) => {
-                        // 提取 data 字段
-                        if let Some(data) = configmap_obj.get("data") {
-                            info!(
-                                "✅ Successfully loaded ConfigMap '{}' data from etcd",
-                                configmap_name
-                            );
-                            Ok(Some(data.clone()))
-                        } else {
-                            warn!("⚠️  ConfigMap '{}' has no 'data' field", configmap_name);
-                            Ok(None)
-                        }
-                    }
-                    Err(e) => {
-                        error!(
-                            "❌ Failed to parse ConfigMap '{}' YAML: {}",
-                            configmap_name, e
-                        );
-                        Err(anyhow::anyhow!("Failed to parse ConfigMap YAML: {}", e))
-                    }
-                }
-            }
-            Ok(_) => {
-                info!(
-                    "🔍 ConfigMap '{}' not found in etcd (key: {})",
-                    configmap_name, configmap_key
-                );
-                Ok(None)
-            }
-            Err(e) => {
-                error!(
-                    "❌ Failed to query etcd for ConfigMap '{}': {}",
-                    configmap_name, e
-                );
-                Err(anyhow::anyhow!("Failed to query etcd for ConfigMap: {}", e))
-            }
-        }
-    }
-
-    /// 从etcd加载Secret数据
-    async fn load_secret_from_etcd(
-        etcd_manager: &Arc<EtcdManager>,
-        cluster_name: &str,
-        secret_name: &str,
-    ) -> Result<Option<serde_yaml::Value>> {
-        let secret_key = format!("/nokube/{}/secrets/{}", cluster_name, secret_name);
-
-        match etcd_manager.get(secret_key.clone()).await {
-            Ok(kvs) if !kvs.is_empty() => {
-                let secret_yaml = String::from_utf8_lossy(&kvs[0].value);
-                info!(
-                    "🔍 Loading Secret '{}' from etcd: {} bytes",
-                    secret_name,
-                    secret_yaml.len()
-                );
-
-                match serde_yaml::from_str::<serde_yaml::Value>(&secret_yaml) {
-                    Ok(secret_obj) => {
-                        if let Some(data) = secret_obj.get("data") {
-                            info!(
-                                "✅ Successfully loaded Secret '{}' data from etcd",
-                                secret_name
-                            );
-                            Ok(Some(data.clone()))
-                        } else {
-                            warn!("⚠️  Secret '{}' has no 'data' field", secret_name);
-                            Ok(None)
-                        }
-                    }
-                    Err(e) => {
-                        error!("❌ Failed to parse Secret '{}' YAML: {}", secret_name, e);
-                        Err(anyhow::anyhow!("Failed to parse Secret YAML: {}", e))
-                    }
-                }
-            }
-            Ok(_) => {
-                info!(
-                    "🔍 Secret '{}' not found in etcd (key: {})",
-                    secret_name, secret_key
-                );
-                Ok(None)
-            }
-            Err(e) => {
-                error!(
-                    "❌ Failed to query etcd for Secret '{}': {}",
-                    secret_name, e
-                );
-                Err(anyhow::anyhow!("Failed to query etcd for Secret: {}", e))
-            }
-        }
     }
 }

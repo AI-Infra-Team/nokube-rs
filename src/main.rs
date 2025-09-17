@@ -606,8 +606,8 @@ async fn main() -> Result<()> {
     }
 
     async fn apply_pod(doc: &serde_yaml::Value, cluster_name: &str, name: &str) -> Result<()> {
-        use crate::k8s::objects::{ContainerSpec, PodObject};
-        use crate::k8s::{AsyncTaskObject, GlobalAttributionPath};
+        use crate::k8s::actors::{ContainerSpec, PodActor};
+        use crate::k8s::{AsyncActor, GlobalAttributionPath};
         use std::sync::Arc;
 
         info!("Creating Pod '{}' in cluster '{}'", name, cluster_name);
@@ -670,7 +670,7 @@ async fn main() -> Result<()> {
         let attribution_path = GlobalAttributionPath::new(format!("pods/{}", name));
 
         // 创建并启动 Pod
-        let mut pod = PodObject::new(
+        let mut pod = PodActor::new(
             name.to_string(),
             "default".to_string(), // 默认namespace
             attribution_path,
@@ -1355,7 +1355,7 @@ async fn get_pods(
     output: &str,
     all_namespaces: bool,
 ) -> Result<()> {
-    use crate::k8s::objects::PodDescription;
+    use crate::k8s::actors::PodDescription;
 
     let namespace = if all_namespaces { "*" } else { "default" };
 
@@ -1373,12 +1373,12 @@ async fn get_pods(
                 // 获取特定 pod
                 match PodDescription::from_etcd(config_manager, cluster_name, pod_name).await? {
                     Some(pod_desc) => {
-                        let ready_str =
-                            if pod_desc.status == crate::k8s::objects::PodStatus::Running {
-                                "1/1"
-                            } else {
-                                "0/1"
-                            };
+                        let ready_str = if pod_desc.status == crate::k8s::actors::PodStatus::Running
+                        {
+                            "1/1"
+                        } else {
+                            "0/1"
+                        };
 
                         let node_name = pod_desc.node.split('/').next().unwrap_or("unknown");
                         let age = "5m"; // 简化处理，可以根据 start_time 计算
@@ -1421,7 +1421,7 @@ async fn get_pods(
                         {
                             Some(pod_desc) => {
                                 let ready_str =
-                                    if pod_desc.status == crate::k8s::objects::PodStatus::Running {
+                                    if pod_desc.status == crate::k8s::actors::PodStatus::Running {
                                         "1/1"
                                     } else {
                                         "0/1"
@@ -1863,8 +1863,7 @@ async fn describe_pod(
     info!("Describing pod '{}' in cluster '{}'", name, cluster_name);
 
     // 尝试从etcd获取真实的pod描述信息
-    match crate::k8s::objects::PodDescription::from_etcd(config_manager, cluster_name, name).await?
-    {
+    match crate::k8s::actors::PodDescription::from_etcd(config_manager, cluster_name, name).await? {
         Some(pod_desc) => {
             // 使用真实数据显示pod描述信息
             println!("{}", pod_desc.display());

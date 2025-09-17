@@ -1,8 +1,7 @@
-// k8s对象实现 - DaemonSet, Deployment, Pod等计算型对象
+// Actor 实现 - DaemonSet、Deployment、Pod 等模拟单元
 use crate::config::config_manager::ConfigManager;
 use crate::k8s::the_proxy::ActorAliveRequest;
-use crate::k8s::ActorOrphanCleanup;
-use crate::k8s::{AsyncTaskObject, ComponentStatus, GlobalAttributionPath, K8sObjectType};
+use crate::k8s::{ActorKind, ActorOrphanCleanup, ActorState, AsyncActor, GlobalAttributionPath};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -487,9 +486,9 @@ pub struct VolumeMount {
     pub read_only: bool,
 }
 
-/// DaemonSet对象 - 在nodeaffinity允许的所有节点上都部署一个实例
+/// DaemonSetActor - 在nodeaffinity允许的所有节点上都部署一个实例
 #[derive(Debug)]
-pub struct DaemonSetObject {
+pub struct DaemonSetActor {
     pub name: String,
     pub namespace: String,
     pub attribution_path: GlobalAttributionPath,
@@ -499,14 +498,14 @@ pub struct DaemonSetObject {
     pub cluster_name: String, // 添加集群名称
 
     // 运行时状态
-    pub pods: HashMap<String, PodObject>, // node_name -> pod
+    pub pods: HashMap<String, PodActor>, // node_name -> pod
     // the_proxy连接
     pub proxy_tx: mpsc::Sender<ActorAliveRequest>,
-    pub status: ComponentStatus,
+    pub status: ActorState,
     pub config_manager: Arc<ConfigManager>, // 添加 ConfigManager
 }
 
-impl DaemonSetObject {
+impl DaemonSetActor {
     pub fn new(
         name: String,
         namespace: String,
@@ -528,7 +527,7 @@ impl DaemonSetObject {
             cluster_name,
             pods: HashMap::new(),
             proxy_tx,
-            status: ComponentStatus::Starting,
+            status: ActorState::Starting,
             config_manager,
         }
     }
@@ -554,7 +553,7 @@ impl DaemonSetObject {
                 let pod_name = format!("{}-{}", self.name, node_name);
                 let pod_attribution_path = self.attribution_path.child(&pod_name);
 
-                let mut pod = PodObject::new(
+                let mut pod = PodActor::new(
                     pod_name,
                     self.namespace.clone(),
                     pod_attribution_path,
@@ -597,9 +596,9 @@ impl DaemonSetObject {
 }
 
 #[async_trait::async_trait]
-impl AsyncTaskObject for DaemonSetObject {
-    fn object_type(&self) -> K8sObjectType {
-        K8sObjectType::DaemonSet
+impl AsyncActor for DaemonSetActor {
+    fn actor_kind(&self) -> ActorKind {
+        ActorKind::DaemonSet
     }
 
     fn attribution_path(&self) -> &GlobalAttributionPath {
@@ -609,7 +608,7 @@ impl AsyncTaskObject for DaemonSetObject {
     async fn start(&mut self) -> Result<()> {
         tracing::info!("Starting DaemonSet: {}", self.name);
 
-        self.status = ComponentStatus::Starting;
+        self.status = ActorState::Starting;
         self.send_alive_signal().await?;
 
         // 确保Pod在所有匹配的节点上运行
@@ -626,7 +625,7 @@ impl AsyncTaskObject for DaemonSetObject {
             }
         });
 
-        self.status = ComponentStatus::Running;
+        self.status = ActorState::Running;
         self.send_alive_signal().await?;
 
         tracing::info!("DaemonSet {} started successfully", self.name);
@@ -636,7 +635,7 @@ impl AsyncTaskObject for DaemonSetObject {
     async fn stop(&mut self) -> Result<()> {
         tracing::info!("Stopping DaemonSet: {}", self.name);
 
-        self.status = ComponentStatus::Stopping;
+        self.status = ActorState::Stopping;
         self.send_alive_signal().await?;
 
         // 停止所有Pod
@@ -670,7 +669,7 @@ impl AsyncTaskObject for DaemonSetObject {
     }
 }
 
-impl DaemonSetObject {
+impl DaemonSetActor {
     async fn send_alive_signal(&self) -> Result<()> {
         let request = ActorAliveRequest {
             actor_path: self.attribution_path.clone(),
@@ -688,9 +687,9 @@ impl DaemonSetObject {
     }
 }
 
-/// Deployment对象 - 根据nodeaffinity随机分发实例到若干节点
+/// DeploymentActor - 根据nodeaffinity随机分发实例到若干节点
 #[derive(Debug)]
-pub struct DeploymentObject {
+pub struct DeploymentActor {
     pub name: String,
     pub namespace: String,
     pub attribution_path: GlobalAttributionPath,
@@ -701,14 +700,14 @@ pub struct DeploymentObject {
     pub replicas: i32,
 
     // 运行时状态
-    pub pods: HashMap<String, PodObject>, // pod_name -> pod
+    pub pods: HashMap<String, PodActor>, // pod_name -> pod
     // the_proxy连接
     pub proxy_tx: mpsc::Sender<ActorAliveRequest>,
-    pub status: ComponentStatus,
+    pub status: ActorState,
     pub config_manager: Arc<ConfigManager>, // 添加 ConfigManager
 }
 
-impl DeploymentObject {
+impl DeploymentActor {
     pub fn new(
         name: String,
         namespace: String,
@@ -732,7 +731,7 @@ impl DeploymentObject {
             replicas,
             pods: HashMap::new(),
             proxy_tx,
-            status: ComponentStatus::Starting,
+            status: ActorState::Starting,
             config_manager,
         }
     }
@@ -760,7 +759,7 @@ impl DeploymentObject {
                     );
                     let pod_attribution_path = self.attribution_path.child(&pod_name);
 
-                    let mut pod = PodObject::new(
+                    let mut pod = PodActor::new(
                         pod_name.clone(),
                         self.namespace.clone(),
                         pod_attribution_path,
@@ -808,9 +807,9 @@ impl DeploymentObject {
 }
 
 #[async_trait::async_trait]
-impl AsyncTaskObject for DeploymentObject {
-    fn object_type(&self) -> K8sObjectType {
-        K8sObjectType::Deployment
+impl AsyncActor for DeploymentActor {
+    fn actor_kind(&self) -> ActorKind {
+        ActorKind::Deployment
     }
 
     fn attribution_path(&self) -> &GlobalAttributionPath {
@@ -820,12 +819,12 @@ impl AsyncTaskObject for DeploymentObject {
     async fn start(&mut self) -> Result<()> {
         tracing::info!("Starting Deployment: {}", self.name);
 
-        self.status = ComponentStatus::Starting;
+        self.status = ActorState::Starting;
         self.send_alive_signal().await?;
 
         self.ensure_pods().await?;
 
-        self.status = ComponentStatus::Running;
+        self.status = ActorState::Running;
         self.send_alive_signal().await?;
 
         tracing::info!("Deployment {} started successfully", self.name);
@@ -835,7 +834,7 @@ impl AsyncTaskObject for DeploymentObject {
     async fn stop(&mut self) -> Result<()> {
         tracing::info!("Stopping Deployment: {}", self.name);
 
-        self.status = ComponentStatus::Stopping;
+        self.status = ActorState::Stopping;
         self.send_alive_signal().await?;
 
         for (_, mut pod) in std::mem::take(&mut self.pods) {
@@ -866,7 +865,7 @@ impl AsyncTaskObject for DeploymentObject {
     }
 }
 
-impl DeploymentObject {
+impl DeploymentActor {
     async fn send_alive_signal(&self) -> Result<()> {
         let request = ActorAliveRequest {
             actor_path: self.attribution_path.clone(),
@@ -884,9 +883,9 @@ impl DeploymentObject {
     }
 }
 
-/// Pod对象 - 循环运行其关联的docker容器
+/// PodActor - 循环运行其关联的docker容器
 #[derive(Debug)]
-pub struct PodObject {
+pub struct PodActor {
     pub name: String,
     pub namespace: String,
     pub attribution_path: GlobalAttributionPath,
@@ -899,13 +898,13 @@ pub struct PodObject {
     pub container_id: Option<String>,
     // the_proxy连接
     pub proxy_tx: mpsc::Sender<ActorAliveRequest>,
-    pub status: ComponentStatus,
+    pub status: ActorState,
 
     // 添加 ConfigManager 引用以写入 etcd
     pub config_manager: Arc<ConfigManager>,
 }
 
-impl PodObject {
+impl PodActor {
     pub fn new(
         name: String,
         namespace: String,
@@ -927,7 +926,7 @@ impl PodObject {
             cluster_name,
             container_id: None,
             proxy_tx,
-            status: ComponentStatus::Starting,
+            status: ActorState::Starting,
             config_manager,
         }
     }
@@ -945,13 +944,13 @@ impl PodObject {
             "image": self.container_spec.image,
             "container_id": self.container_id,
             "status": match self.status {
-                ComponentStatus::Starting => "Pending",
-                ComponentStatus::Running => "Running",
-                ComponentStatus::Stopping => "Terminating",
-                ComponentStatus::Failed => "Failed",
-                ComponentStatus::Stopped => "Failed",
+                ActorState::Starting => "Pending",
+                ActorState::Running => "Running",
+                ActorState::Stopping => "Terminating",
+                ActorState::Failed => "Failed",
+                ActorState::Stopped => "Failed",
             },
-            "ready": matches!(self.status, ComponentStatus::Running),
+            "ready": matches!(self.status, ActorState::Running),
             "restart_count": 0,
             "start_time": chrono::Utc::now().to_rfc3339(),
             "pod_ip": match &self.container_id {
@@ -960,7 +959,7 @@ impl PodObject {
             },
             "labels": {
                 "app": self.name,
-                "component": "pod"
+                "role": "pod"
             },
             "ports": self.container_spec.command.as_ref()
                 .map(|cmd| if cmd.iter().any(|c| c.contains("port")) {
@@ -991,7 +990,7 @@ impl PodObject {
         let events_key = format!("/nokube/{}/events/pod/{}", self.cluster_name, self.name);
 
         let events = match self.status {
-            ComponentStatus::Starting => vec![
+            ActorState::Starting => vec![
                 serde_json::json!({
                     "type": "Normal",
                     "reason": "Scheduled",
@@ -1007,7 +1006,7 @@ impl PodObject {
                     "timestamp": chrono::Utc::now().to_rfc3339()
                 }),
             ],
-            ComponentStatus::Running => vec![
+            ActorState::Running => vec![
                 serde_json::json!({
                     "type": "Normal",
                     "reason": "Scheduled",
@@ -1102,7 +1101,7 @@ impl PodObject {
 }
 
 #[async_trait::async_trait]
-impl ActorOrphanCleanup for PodObject {
+impl ActorOrphanCleanup for PodActor {
     async fn cleanup_if_orphaned(&self) -> anyhow::Result<()> {
         // 解析父路径，形如 "deployment/<name>"
         let parent = self.attribution_path.parent();
@@ -1160,9 +1159,9 @@ impl ActorOrphanCleanup for PodObject {
 }
 
 #[async_trait::async_trait]
-impl AsyncTaskObject for PodObject {
-    fn object_type(&self) -> K8sObjectType {
-        K8sObjectType::Pod
+impl AsyncActor for PodActor {
+    fn actor_kind(&self) -> ActorKind {
+        ActorKind::Pod
     }
 
     fn attribution_path(&self) -> &GlobalAttributionPath {
@@ -1172,7 +1171,7 @@ impl AsyncTaskObject for PodObject {
     async fn start(&mut self) -> Result<()> {
         tracing::info!("Starting Pod: {}", self.name);
 
-        self.status = ComponentStatus::Starting;
+        self.status = ActorState::Starting;
         self.send_alive_signal().await?;
 
         // 保存 Starting 状态到 etcd
@@ -1180,7 +1179,7 @@ impl AsyncTaskObject for PodObject {
 
         self.start_container().await?;
 
-        self.status = ComponentStatus::Running;
+        self.status = ActorState::Running;
         self.send_alive_signal().await?;
 
         // 保存 Running 状态到 etcd
@@ -1193,7 +1192,7 @@ impl AsyncTaskObject for PodObject {
     async fn stop(&mut self) -> Result<()> {
         tracing::info!("Stopping Pod: {}", self.name);
 
-        self.status = ComponentStatus::Stopping;
+        self.status = ActorState::Stopping;
         self.send_alive_signal().await?;
 
         if let Some(container_id) = &self.container_id {
@@ -1231,7 +1230,7 @@ impl AsyncTaskObject for PodObject {
     }
 }
 
-impl PodObject {
+impl PodActor {
     async fn send_alive_signal(&self) -> Result<()> {
         let request = ActorAliveRequest {
             actor_path: self.attribution_path.clone(),

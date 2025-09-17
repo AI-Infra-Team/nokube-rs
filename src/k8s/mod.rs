@@ -1,8 +1,8 @@
 // NoKube Kubernetes抽象层
 // 支持往k8s集群apply k8s yaml，通过service agent内的协程运行
 
+pub mod actors;
 pub mod controllers;
-pub mod objects;
 pub mod storage;
 pub mod the_proxy;
 
@@ -45,20 +45,21 @@ impl GlobalAttributionPath {
     }
 }
 
-/// k8s对象类型
+/// Actor 类型（模拟 K8s 角色）
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum K8sObjectType {
+pub enum ActorKind {
     ConfigMap,
     Secret,
     DaemonSet,
     Deployment,
     Pod,
+    Controller,
 }
 
-/// 异步任务对象模板基础trait
+/// 异步 Actor 基础 trait
 #[async_trait::async_trait]
-pub trait AsyncTaskObject: Send + Sync {
-    fn object_type(&self) -> K8sObjectType;
+pub trait AsyncActor: Send + Sync {
+    fn actor_kind(&self) -> ActorKind;
     fn attribution_path(&self) -> &GlobalAttributionPath;
     async fn start(&mut self) -> Result<()>;
     async fn stop(&mut self) -> Result<()>;
@@ -66,9 +67,9 @@ pub trait AsyncTaskObject: Send + Sync {
     async fn health_check(&self) -> Result<bool>;
 }
 
-/// 组件状态 - 用于 TheProxy 系统
+/// Actor 状态 - 用于 TheProxy 系统
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum ComponentStatus {
+pub enum ActorState {
     Starting,
     Running,
     Stopping,

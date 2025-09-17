@@ -1,0 +1,926 @@
+Detected proxy env: http_proxy=http://10.126.126.235:7890
+Detected proxy env: HTTP_PROXY=http://10.126.126.235:7890
+Detected proxy env: https_proxy=http://10.126.126.235:7890
+Detected proxy env: HTTPS_PROXY=http://10.126.126.235:7890
+Detected proxy env: no_proxy=localhost,127.0.0.1,192.168.,10.126.
+Detected proxy env: NO_PROXY=localhost,127.0.0.1,192.168.,10.126.
+No dependency changes detected, skipping rebuild.
+Using existing image: opt_devcon_pa_nokube-rs_build_build:latest
+Environment variables:
+HTTP_PROXY=http://10.126.126.235:7890
+https_proxy=http://10.126.126.235:7890
+http_proxy=http://10.126.126.235:7890
+no_proxy=localhost,127.0.0.1,192.168.,10.126.
+NO_PROXY=localhost,127.0.0.1,192.168.,10.126.
+HTTPS_PROXY=http://10.126.126.235:7890
+   Compiling nokube-rs v0.1.0 (/app)
+warning: unused import: `crate::agent::master_agent::GrafanaManager`
+ --> src/agent/command_mode_agent.rs:1:5
+  |
+1 | use crate::agent::master_agent::GrafanaManager;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` on by default
+
+warning: unused import: `std::io::Write`
+ --> src/agent/command_mode_agent.rs:4:5
+  |
+4 | use std::io::Write;
+  |     ^^^^^^^^^^^^^^
+
+warning: unused import: `DeploymentObject`
+ --> src/agent/service_agent/service_mode_agent.rs:9:59
+  |
+9 | use crate::k8s::objects::{ContainerSpec, DaemonSetObject, DeploymentObject, NodeAffinity};
+  |                                                           ^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::collections::HashSet`
+    --> src/agent/service_agent/service_mode_agent.rs:1442:17
+     |
+1442 |             use std::collections::HashSet;
+     |                 ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::agent::master_agent::GrafanaManager`
+ --> src/remote_ctl/deployment_controller.rs:1:5
+  |
+1 | use crate::agent::master_agent::GrafanaManager;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `ssh2::Stream`
+  --> src/remote_ctl/ssh_manager.rs:91:17
+   |
+91 |             use ssh2::Stream;
+   |                 ^^^^^^^^^^^^
+
+warning: unused variable: `namespace`
+    --> src/main.rs:1360:9
+     |
+1360 |     let namespace = if all_namespaces { "*" } else { "default" };
+     |         ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_namespace`
+     |
+     = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `total`
+    --> src/main.rs:1569:29
+     |
+1569 |                 let (ready, total) = pod_ready_count.get(dep_name).cloned().unwrap_or((0, 0));
+     |                             ^^^^^ help: if this is intentional, prefix it with an underscore: `_total`
+
+warning: unused variable: `name`
+    --> src/main.rs:1623:5
+     |
+1623 |     name: Option<String>,
+     |     ^^^^ help: if this is intentional, prefix it with an underscore: `_name`
+
+warning: unused variable: `output`
+    --> src/main.rs:1624:5
+     |
+1624 |     output: &str,
+     |     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_output`
+
+warning: unused variable: `current_user`
+   --> src/agent/command_mode_agent.rs:299:13
+    |
+299 |         let current_user = std::env::var("USER").map_err(|_| {
+    |             ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_current_user`
+
+warning: unused variable: `node_id`
+   --> src/agent/general/exporter.rs:444:9
+    |
+444 |         node_id: &str,
+    |         ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_node_id`
+
+warning: unused variable: `daemonset_yaml`
+    --> src/agent/service_agent/service_mode_agent.rs:1662:44
+     |
+1662 | ...                   Ok(daemonset_yaml) => {
+     |                          ^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_daemonset_yaml`
+
+warning: unused variable: `ds_container_name`
+    --> src/agent/service_agent/service_mode_agent.rs:1684:49
+     |
+1684 | ...                   let ds_container_name = format!(
+     |                           ^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_ds_container_name`
+
+warning: unused variable: `configmap_data`
+    --> src/agent/service_agent/service_mode_agent.rs:1760:13
+     |
+1760 |         let configmap_data = spec.get("configMap").and_then(|cm| cm.get("data"));
+     |             ^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_configmap_data`
+
+warning: unused variable: `daemonsets`
+   --> src/k8s/controllers.rs:210:13
+    |
+210 |         let daemonsets = self.daemonsets.clone();
+    |             ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_daemonsets`
+
+warning: unused variable: `deployments`
+   --> src/k8s/controllers.rs:211:13
+    |
+211 |         let deployments = self.deployments.clone();
+    |             ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_deployments`
+
+warning: unused variable: `daemonset`
+   --> src/k8s/controllers.rs:240:29
+    |
+240 |                 if let Some(daemonset) = daemonsets.get(name) {
+    |                             ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_daemonset`
+
+warning: unused variable: `deployment`
+   --> src/k8s/controllers.rs:249:29
+    |
+249 |                 if let Some(deployment) = deployments.get(name) {
+    |                             ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_deployment`
+
+warning: unused variable: `target_user`
+   --> src/remote_ctl/deployment_controller.rs:680:21
+    |
+680 |                 let target_user = node.users.first().ok_or_else(|| {
+    |                     ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_target_user`
+
+warning: unused import: `base64::Engine`
+ --> src/agent/general/log_collector.rs:3:5
+  |
+3 | use base64::Engine;
+  |     ^^^^^^^^^^^^^^
+
+warning: unused variable: `command`
+   --> src/agent/general/docker_runner.rs:531:23
+    |
+531 |     fn format_command(command: &Command, config: &DockerRunConfig, runtime_name: &str) -> String {
+    |                       ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_command`
+
+warning: unused variable: `headers_str`
+  --> src/agent/general/log_collector.rs:98:13
+   |
+98 |         let headers_str = "X-Greptime-DB-Name=public,\
+   |             ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_headers_str`
+
+warning: unused variable: `attribution_path`
+   --> src/k8s/objects.rs:619:13
+    |
+619 |         let attribution_path = self.attribution_path.clone();
+    |             ^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_attribution_path`
+
+warning: unused variable: `proxy_tx`
+   --> src/k8s/objects.rs:620:13
+    |
+620 |         let proxy_tx = self.proxy_tx.clone();
+    |             ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_proxy_tx`
+
+warning: type `ActorStatus` is more private than the item `TheProxy::get_actor_states`
+   --> src/k8s/the_proxy.rs:271:5
+    |
+271 |     pub async fn get_actor_states(&self) -> HashMap<GlobalAttributionPath, ActorStatus> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method `TheProxy::get_actor_states` is reachable at visibility `pub(crate)`
+    |
+note: but type `ActorStatus` is only usable at visibility `pub(self)`
+   --> src/k8s/the_proxy.rs:33:1
+    |
+33  | struct ActorStatus {
+    | ^^^^^^^^^^^^^^^^^^
+    = note: `#[warn(private_interfaces)]` on by default
+
+warning: variants `Pip` and `Docker` are never constructed
+  --> src/agent/command_mode_agent.rs:10:5
+   |
+9  | pub enum DependencyType {
+   |          -------------- variants in this enum
+10 |     Pip(String),
+   |     ^^^
+11 |     Apt(String),
+12 |     Docker(String),
+   |     ^^^^^^
+   |
+   = note: `DependencyType` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+   = note: `#[warn(dead_code)]` on by default
+
+warning: associated function `is_running` is never used
+   --> src/agent/general/docker_runner.rs:513:12
+    |
+241 | impl DockerRunner {
+    | ----------------- associated function in this implementation
+...
+513 |     pub fn is_running(container_name: &str) -> bool {
+    |            ^^^^^^^^^^
+
+warning: fields `auth_user` and `auth_password` are never read
+  --> src/agent/general/log_collector.rs:55:9
+   |
+48 | pub struct LogCollectorConfig {
+   |            ------------------ fields in this struct
+...
+55 |     pub auth_user: Option<String>,
+   |         ^^^^^^^^^
+56 |     pub auth_password: Option<String>,
+   |         ^^^^^^^^^^^^^
+   |
+   = note: `LogCollectorConfig` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: fields `log_buffer` and `client` are never read
+  --> src/agent/general/log_collector.rs:62:5
+   |
+60 | pub struct LogCollector {
+   |            ------------ fields in this struct
+61 |     config: LogCollectorConfig,
+62 |     log_buffer: Vec<LogEntry>,
+   |     ^^^^^^^^^^
+...
+65 |     client: reqwest::Client,
+   |     ^^^^^^
+
+warning: methods `log` and `collect_docker_logs` are never used
+   --> src/agent/general/log_collector.rs:393:18
+    |
+69  | impl LogCollector {
+    | ----------------- methods in this implementation
+...
+393 |     pub async fn log(&self, entry: LogEntry) {
+    |                  ^^^
+...
+401 |     pub async fn collect_docker_logs(&self, container_name: &str) -> Result<()> {
+    |                  ^^^^^^^^^^^^^^^^^^^
+
+warning: methods `log_info`, `log_warn`, and `log_error` are never used
+   --> src/agent/general/log_collector.rs:628:8
+    |
+627 | pub trait GreptimeDBLogger {
+    |           ---------------- methods in this trait
+628 |     fn log_info(&self, source: &str, source_id: &str, message: &str);
+    |        ^^^^^^^^
+629 |     fn log_warn(&self, source: &str, source_id: &str, message: &str);
+    |        ^^^^^^^^
+630 |     fn log_error(&self, source: &str, source_id: &str, message: &str);
+    |        ^^^^^^^^^
+
+warning: associated function `new` is never used
+   --> src/agent/general/log_collector.rs:641:12
+    |
+640 | impl GreptimeDBLogWriter {
+    | ------------------------ associated function in this implementation
+641 |     pub fn new(sender: mpsc::Sender<LogEntry>, cluster_name: String, node_name: String) -> Self {
+    |            ^^^
+
+warning: method `is_process_running` is never used
+   --> src/agent/general/process_manager.rs:256:12
+    |
+14  | impl ProcessManager {
+    | ------------------- method in this implementation
+...
+256 |     pub fn is_process_running(&mut self, name: &str) -> bool {
+    |            ^^^^^^^^^^^^^^^^^^
+
+warning: struct `RemoteExecutor` is never constructed
+ --> src/agent/general/remote_executor.rs:6:12
+  |
+6 | pub struct RemoteExecutor {
+  |            ^^^^^^^^^^^^^^
+
+warning: associated items `new`, `with_proxy`, `set_proxy`, `apply_proxy_env`, `execute_command`, and `execute_script` are never used
+  --> src/agent/general/remote_executor.rs:11:12
+   |
+10 | impl RemoteExecutor {
+   | ------------------- associated items in this implementation
+11 |     pub fn new() -> Self {
+   |            ^^^
+...
+15 |     pub fn with_proxy(proxy_config: ProxyConfig) -> Self {
+   |            ^^^^^^^^^^
+...
+21 |     pub fn set_proxy(&mut self, proxy_config: Option<ProxyConfig>) {
+   |            ^^^^^^^^^
+...
+25 |     fn apply_proxy_env(&self, command: &mut Command) {
+   |        ^^^^^^^^^^^^^^^
+...
+42 |     pub async fn execute_command(&self, command: &str) -> Result<CommandResult> {
+   |                  ^^^^^^^^^^^^^^^
+...
+69 |     pub async fn execute_script(&self, script_content: &str) -> Result<CommandResult> {
+   |                  ^^^^^^^^^^^^^^
+
+warning: struct `CommandResult` is never constructed
+  --> src/agent/general/remote_executor.rs:98:12
+   |
+98 | pub struct CommandResult {
+   |            ^^^^^^^^^^^^^
+   |
+   = note: `CommandResult` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: struct `GrafanaManager` is never constructed
+ --> src/agent/master_agent/grafana_manager.rs:6:12
+  |
+6 | pub struct GrafanaManager {
+  |            ^^^^^^^^^^^^^^
+
+warning: multiple associated items are never used
+    --> src/agent/master_agent/grafana_manager.rs:14:12
+     |
+13   | impl GrafanaManager {
+     | ------------------- associated items in this implementation
+14   |     pub fn new(port: u16, greptimedb_endpoint: String, workspace: String) -> Self {
+     |            ^^^
+...
+23   |     pub fn with_ssh(
+     |            ^^^^^^^^
+...
+37   |     pub async fn setup_grafana(&self, cluster_name: &str) -> Result<()> {
+     |                  ^^^^^^^^^^^^^
+...
+56   |     async fn create_grafana_config(&self) -> Result<()> {
+     |              ^^^^^^^^^^^^^^^^^^^^^
+...
+111  |     async fn stop_existing_container(&self) -> Result<()> {
+     |              ^^^^^^^^^^^^^^^^^^^^^^^
+...
+152  |     async fn start_grafana_container(&self) -> Result<()> {
+     |              ^^^^^^^^^^^^^^^^^^^^^^^
+...
+224  |     async fn verify_container_running(&self, ssh: &SSHManager, container_id: &str) -> Result<()> {
+     |              ^^^^^^^^^^^^^^^^^^^^^^^^
+...
+271  |     fn extract_container_id_from_error(&self, error_msg: &str) -> Option<String> {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+290  |     async fn configure_data_source(&self) -> Result<()> {
+     |              ^^^^^^^^^^^^^^^^^^^^^
+...
+420  |     async fn import_dashboards(&self) -> Result<()> {
+     |              ^^^^^^^^^^^^^^^^^
+...
+451  |     async fn wait_for_grafana_api(&self) -> Result<()> {
+     |              ^^^^^^^^^^^^^^^^^^^^
+...
+485  |     async fn import_cluster_dashboard(&self) -> Result<()> {
+     |              ^^^^^^^^^^^^^^^^^^^^^^^^
+...
+732  |     async fn set_home_dashboard(&self, uid: &str) -> Result<()> {
+     |              ^^^^^^^^^^^^^^^^^^
+...
+779  |     async fn import_service_dashboard(&self) -> Result<()> {
+     |              ^^^^^^^^^^^^^^^^^^^^^^^^
+...
+1022 |     async fn import_actor_dashboard(&self) -> Result<()> {
+     |              ^^^^^^^^^^^^^^^^^^^^^^
+...
+1211 |     async fn import_logs_dashboard(&self) -> Result<()> {
+     |              ^^^^^^^^^^^^^^^^^^^^^
+...
+1400 |     pub async fn stop_grafana(&self) -> Result<()> {
+     |                  ^^^^^^^^^^^^
+
+warning: struct `MasterAgent` is never constructed
+ --> src/agent/master_agent/master_agent_core.rs:7:12
+  |
+7 | pub struct MasterAgent {
+  |            ^^^^^^^^^^^
+
+warning: associated items `new`, `start`, `stop`, `store_cluster_config`, `update_cluster_config`, and `execute_cluster_command` are never used
+  --> src/agent/master_agent/master_agent_core.rs:14:18
+   |
+13 | impl MasterAgent {
+   | ---------------- associated items in this implementation
+14 |     pub async fn new(cluster_config: ClusterConfig, etcd_endpoints: Vec<String>) -> Result<Self> {
+   |                  ^^^
+...
+34 |     pub async fn start(&mut self) -> Result<()> {
+   |                  ^^^^^
+...
+46 |     pub async fn stop(&mut self) -> Result<()> {
+   |                  ^^^^
+...
+52 |     async fn store_cluster_config(&self) -> Result<()> {
+   |              ^^^^^^^^^^^^^^^^^^^^
+...
+60 |     pub async fn update_cluster_config(&mut self, new_config: ClusterConfig) -> Result<()> {
+   |                  ^^^^^^^^^^^^^^^^^^^^^
+...
+67 |     pub async fn execute_cluster_command(&self, command: &str) -> Result<()> {
+   |                  ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: methods `update_cluster_config`, `store_pod_status`, and `store_pod_events` are never used
+    --> src/agent/service_agent/service_mode_agent.rs:90:18
+     |
+33   | impl ServiceModeAgent {
+     | --------------------- methods in this implementation
+...
+90   |     pub async fn update_cluster_config(&self, config: &ClusterConfig) -> anyhow::Result<()> {
+     |                  ^^^^^^^^^^^^^^^^^^^^^
+...
+1308 |     async fn store_pod_status(
+     |              ^^^^^^^^^^^^^^^^
+...
+1352 |     async fn store_pod_events(
+     |              ^^^^^^^^^^^^^^^^
+
+warning: methods `add_node` and `add_service` are never used
+   --> src/config/cluster_config.rs:214:12
+    |
+184 | impl ClusterConfig {
+    | ------------------ methods in this implementation
+...
+214 |     pub fn add_node(&mut self, node: NodeConfig) {
+    |            ^^^^^^^^
+...
+218 |     pub fn add_service(&mut self, _service: ServiceConfig) {
+    |            ^^^^^^^^^^^
+
+warning: method `get_cluster_meta` is never used
+   --> src/config/config_manager.rs:111:18
+    |
+19  | impl ConfigManager {
+    | ------------------ method in this implementation
+...
+111 |     pub async fn get_cluster_meta(
+    |                  ^^^^^^^^^^^^^^^^
+
+warning: methods `get_cluster_meta`, `watch_cluster_config`, and `delete_cluster_config` are never used
+   --> src/config/etcd_manager.rs:35:18
+    |
+22  | impl EtcdManager {
+    | ---------------- methods in this implementation
+...
+35  |     pub async fn get_cluster_meta(
+    |                  ^^^^^^^^^^^^^^^^
+...
+118 |     pub async fn watch_cluster_config<F>(
+    |                  ^^^^^^^^^^^^^^^^^^^^
+...
+164 |     pub async fn delete_cluster_config(&self, cluster_name: &str) -> Result<()> {
+    |                  ^^^^^^^^^^^^^^^^^^^^^
+
+warning: variants `NodeNotFound` and `DependencyInstallationFailed` are never constructed
+  --> src/error.rs:38:5
+   |
+4  | pub enum NokubeError {
+   |          ----------- variants in this enum
+...
+38 |     NodeNotFound(String),
+   |     ^^^^^^^^^^^^
+...
+48 |     DependencyInstallationFailed { dependency: String, reason: String },
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `NokubeError` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: methods `object_type` and `attribution_path` are never used
+  --> src/k8s/mod.rs:61:8
+   |
+60 | pub trait AsyncTaskObject: Send + Sync {
+   |           --------------- methods in this trait
+61 |     fn object_type(&self) -> K8sObjectType;
+   |        ^^^^^^^^^^^
+62 |     fn attribution_path(&self) -> &GlobalAttributionPath;
+   |        ^^^^^^^^^^^^^^^^
+
+warning: field `workspace` is never read
+  --> src/k8s/controllers.rs:16:9
+   |
+14 | pub struct KubeController {
+   |            -------------- field in this struct
+15 |     pub attribution_path: GlobalAttributionPath,
+16 |     pub workspace: String,
+   |         ^^^^^^^^^
+
+warning: methods `add_deployment`, `remove_daemonset`, `remove_deployment`, `restart_component`, and `get_component_status` are never used
+   --> src/k8s/controllers.rs:98:18
+    |
+29  | impl KubeController {
+    | ------------------- methods in this implementation
+...
+98  |     pub async fn add_deployment(&self, mut deployment: DeploymentObject) -> Result<()> {
+    |                  ^^^^^^^^^^^^^^
+...
+111 |     pub async fn remove_daemonset(&self, name: &str) -> Result<()> {
+    |                  ^^^^^^^^^^^^^^^^
+...
+126 |     pub async fn remove_deployment(&self, name: &str) -> Result<()> {
+    |                  ^^^^^^^^^^^^^^^^^
+...
+234 |     pub async fn restart_component(&self, component_type: K8sObjectType, name: &str) -> Result<()> {
+    |                  ^^^^^^^^^^^^^^^^^
+...
+266 |     pub async fn get_component_status(&self) -> HashMap<String, ComponentStatus> {
+    |                  ^^^^^^^^^^^^^^^^^^^^
+
+warning: field `node_affinity` is never read
+   --> src/k8s/objects.rs:496:9
+    |
+492 | pub struct DaemonSetObject {
+    |            --------------- field in this struct
+...
+496 |     pub node_affinity: NodeAffinity,
+    |         ^^^^^^^^^^^^^
+    |
+    = note: `DaemonSetObject` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: method `monitor_pods` is never used
+   --> src/k8s/objects.rs:588:14
+    |
+509 | impl DaemonSetObject {
+    | -------------------- method in this implementation
+...
+588 |     async fn monitor_pods(&mut self) -> Result<()> {
+    |              ^^^^^^^^^^^^
+
+warning: field `node_affinity` is never read
+   --> src/k8s/objects.rs:697:9
+    |
+693 | pub struct DeploymentObject {
+    |            ---------------- field in this struct
+...
+697 |     pub node_affinity: NodeAffinity,
+    |         ^^^^^^^^^^^^^
+    |
+    = note: `DeploymentObject` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: associated function `new` is never used
+   --> src/k8s/objects.rs:712:12
+    |
+711 | impl DeploymentObject {
+    | --------------------- associated function in this implementation
+712 |     pub fn new(
+    |            ^^^
+
+warning: struct `K8sStorageManager` is never constructed
+  --> src/k8s/storage.rs:27:12
+   |
+27 | pub struct K8sStorageManager {
+   |            ^^^^^^^^^^^^^^^^^
+
+warning: multiple associated items are never used
+   --> src/k8s/storage.rs:32:12
+    |
+31  | impl K8sStorageManager {
+    | ---------------------- associated items in this implementation
+32  |     pub fn new(etcd_manager: EtcdManager) -> Self {
+    |            ^^^
+...
+38  |     pub async fn store_configmap(&self, configmap: &ConfigMapObject) -> Result<()> {
+    |                  ^^^^^^^^^^^^^^^
+...
+53  |     pub async fn get_configmap(
+    |                  ^^^^^^^^^^^^^
+...
+71  |     pub async fn store_secret(&self, secret: &SecretObject) -> Result<()> {
+    |                  ^^^^^^^^^^^^
+...
+82  |     pub async fn get_secret(&self, namespace: &str, name: &str) -> Result<Option<SecretObject>> {
+    |                  ^^^^^^^^^^
+...
+95  |     pub async fn list_configmaps(&self, namespace: &str) -> Result<Vec<ConfigMapObject>> {
+    |                  ^^^^^^^^^^^^^^^
+...
+109 |     pub async fn list_secrets(&self, namespace: &str) -> Result<Vec<SecretObject>> {
+    |                  ^^^^^^^^^^^^
+...
+123 |     pub async fn delete_configmap(&self, namespace: &str, name: &str) -> Result<()> {
+    |                  ^^^^^^^^^^^^^^^^
+...
+132 |     pub async fn delete_secret(&self, namespace: &str, name: &str) -> Result<()> {
+    |                  ^^^^^^^^^^^^^
+
+warning: struct `ActorAliveResponse` is never constructed
+  --> src/k8s/the_proxy.rs:25:12
+   |
+25 | pub struct ActorAliveResponse {
+   |            ^^^^^^^^^^^^^^^^^^
+   |
+   = note: `ActorAliveResponse` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: methods `get_actor_states` and `is_actor_alive` are never used
+   --> src/k8s/the_proxy.rs:271:18
+    |
+63  | impl TheProxy {
+    | ------------- methods in this implementation
+...
+271 |     pub async fn get_actor_states(&self) -> HashMap<GlobalAttributionPath, ActorStatus> {
+    |                  ^^^^^^^^^^^^^^^^
+...
+276 |     pub async fn is_actor_alive(&self, actor_path: &GlobalAttributionPath) -> bool {
+    |                  ^^^^^^^^^^^^^^
+
+warning: method `build_nokube_image_snapshot` is never used
+   --> src/remote_ctl/deployment_controller.rs:437:14
+    |
+13  | impl DeploymentController {
+    | ------------------------- method in this implementation
+...
+437 |     async fn build_nokube_image_snapshot(&self, config_path: &str) -> Result<()> {
+    |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: fields `apt_packages` and `pip_packages` are never read
+   --> src/remote_ctl/deployment_controller.rs:440:13
+    |
+439 |         struct HeavySetup {
+    |                ---------- fields in this struct
+440 |             apt_packages: Option<Vec<String>>,
+    |             ^^^^^^^^^^^^
+441 |             pip_packages: Option<Vec<String>>,
+    |             ^^^^^^^^^^^^
+
+warning: fields `base_image` and `heavy_setup` are never read
+   --> src/remote_ctl/deployment_controller.rs:445:13
+    |
+444 |         struct SnapshotCfg {
+    |                ----------- fields in this struct
+445 |             base_image: String,
+    |             ^^^^^^^^^^
+446 |             heavy_setup: Option<HeavySetup>,
+    |             ^^^^^^^^^^^
+
+warning: associated items `new`, `force_upload_file`, `upload_directory`, `upload_directory_recursive`, and `download_file` are never used
+   --> src/remote_ctl/ssh_manager.rs:17:12
+    |
+16  | impl SSHManager {
+    | --------------- associated items in this implementation
+17  |     pub fn new(host: String, username: String, key_path: Option<String>) -> Self {
+    |            ^^^
+...
+235 |     pub async fn force_upload_file(&self, local_path: &str, remote_path: &str) -> Result<()> {
+    |                  ^^^^^^^^^^^^^^^^^
+...
+357 |     pub async fn upload_directory(
+    |                  ^^^^^^^^^^^^^^^^
+...
+469 |     async fn upload_directory_recursive(
+    |              ^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+563 |     pub async fn download_file(&self, remote_path: &str, local_path: &str) -> Result<()> {
+    |                  ^^^^^^^^^^^^^
+
+warning: unused `std::result::Result` in tuple element 0 that must be used
+  --> src/agent/general/exporter.rs:48:9
+   |
+48 |         tokio::try_join!(config_poller, metrics_collector)?;
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: this `Result` may be an `Err` variant, which should be handled
+   = note: `#[warn(unused_must_use)]` on by default
+
+warning: unused `std::result::Result` in tuple element 1 that must be used
+  --> src/agent/general/exporter.rs:48:9
+   |
+48 |         tokio::try_join!(config_poller, metrics_collector)?;
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: this `Result` may be an `Err` variant, which should be handled
+
+warning: `nokube-rs` (bin "nokube") generated 63 warnings (run `cargo fix --bin "nokube"` to apply 6 suggestions)
+    Finished `release` profile [optimized] target(s) in 34.52s
+Ensuring build image exists...
+Using image: opt_devcon_pa_nokube-rs_build_build:latest
+Container already running, using existing container...
+Building project in container...
+Passing proxy env to container: http_proxy=http://10.126.126.235:7890
+Passing proxy env to container: HTTP_PROXY=http://10.126.126.235:7890
+Passing proxy env to container: https_proxy=http://10.126.126.235:7890
+Passing proxy env to container: HTTPS_PROXY=http://10.126.126.235:7890
+Passing proxy env to container: no_proxy=localhost,127.0.0.1,192.168.,10.126.
+Passing proxy env to container: NO_PROXY=localhost,127.0.0.1,192.168.,10.126.
+Build completed successfully
+Copying binary and libraries to output directory...
+Binary copied to: /opt/devcon/pa/nokube-rs/target/nokube
+Copying SSL libraries...
+SSL libraries copied to output directory
+Build and copy completed successfully!
+Output binary: /opt/devcon/pa/nokube-rs/target/nokube
+[2m2025-09-17T03:13:07.279055Z[0m [32m INFO[0m [2mnokube[0m[2m:[0m Deploying/updating cluster from config: home-cluster.yaml
+[2m2025-09-17T03:13:07.279092Z[0m [32m INFO[0m [2mnokube[0m[2m:[0m Reading cluster config from file: home-cluster.yaml
+[2m2025-09-17T03:13:07.279310Z[0m [32m INFO[0m [2mnokube[0m[2m:[0m Successfully loaded cluster config for: home-cluster
+[2m2025-09-17T03:13:07.279329Z[0m [32m INFO[0m [2mnokube[0m[2m:[0m HTTP Server configured: port=8088 (head=10.126.126.235)
+[2m2025-09-17T03:13:07.279335Z[0m [32m INFO[0m [2mnokube[0m[2m:[0m Place artifacts on head at: /opt/devcon/pa/nokube-workspace/public_file_server/releases/nokube
+[2m2025-09-17T03:13:07.279340Z[0m [32m INFO[0m [2mnokube[0m[2m:[0m Nodes will download from: http://10.126.126.235:8088/releases/nokube
+[2m2025-09-17T03:13:07.279353Z[0m [32m INFO[0m [2mnokube::config::config_manager[0m[2m:[0m Loading nokube configuration...
+[2m2025-09-17T03:13:07.279374Z[0m [32m INFO[0m [2mnokube::config::config_manager[0m[2m:[0m Using discovered config: /etc/.nokube/config.yaml
+[2m2025-09-17T03:13:07.279430Z[0m [32m INFO[0m [2mnokube::config::config_manager[0m[2m:[0m Creating EtcdManager with endpoints: ["http://10.126.126.235:2579"]
+[2m2025-09-17T03:13:07.279451Z[0m [32m INFO[0m [2mnokube::config::etcd_manager[0m[2m:[0m Initializing EtcdManager with endpoints: ["http://10.126.126.235:2579"]
+[2m2025-09-17T03:13:07.279457Z[0m [32m INFO[0m [2mnokube::config::etcd_manager[0m[2m:[0m Creating etcd client configuration...
+[2m2025-09-17T03:13:07.279462Z[0m [32m INFO[0m [2mnokube::config::etcd_manager[0m[2m:[0m Attempting to connect to etcd...
+[2m2025-09-17T03:13:07.279574Z[0m [32m INFO[0m [2mnokube::config::etcd_manager[0m[2m:[0m Successfully connected to etcd!
+[2m2025-09-17T03:13:07.279584Z[0m [32m INFO[0m [2mnokube::config::config_manager[0m[2m:[0m ConfigManager initialized successfully
+[2m2025-09-17T03:13:07.279597Z[0m [32m INFO[0m [2mnokube::config::config_manager[0m[2m:[0m Loading nokube configuration...
+[2m2025-09-17T03:13:07.279625Z[0m [32m INFO[0m [2mnokube::config::config_manager[0m[2m:[0m Using discovered config: /etc/.nokube/config.yaml
+[2m2025-09-17T03:13:07.279667Z[0m [32m INFO[0m [2mnokube::config::config_manager[0m[2m:[0m Creating EtcdManager with endpoints: ["http://10.126.126.235:2579"]
+[2m2025-09-17T03:13:07.279675Z[0m [32m INFO[0m [2mnokube::config::etcd_manager[0m[2m:[0m Initializing EtcdManager with endpoints: ["http://10.126.126.235:2579"]
+[2m2025-09-17T03:13:07.279680Z[0m [32m INFO[0m [2mnokube::config::etcd_manager[0m[2m:[0m Creating etcd client configuration...
+[2m2025-09-17T03:13:07.279683Z[0m [32m INFO[0m [2mnokube::config::etcd_manager[0m[2m:[0m Attempting to connect to etcd...
+[2m2025-09-17T03:13:07.279704Z[0m [32m INFO[0m [2mnokube::config::etcd_manager[0m[2m:[0m Successfully connected to etcd!
+[2m2025-09-17T03:13:07.279710Z[0m [32m INFO[0m [2mnokube::config::config_manager[0m[2m:[0m ConfigManager initialized successfully
+[2m2025-09-17T03:13:07.310791Z[0m [32m INFO[0m [2mnokube::config::etcd_manager[0m[2m:[0m Stored cluster config for home-cluster
+[2m2025-09-17T03:13:07.318948Z[0m [32m INFO[0m [2mnokube::config::etcd_manager[0m[2m:[0m Stored cluster meta for home-cluster
+[2m2025-09-17T03:13:07.318972Z[0m [32m INFO[0m [2mnokube::remote_ctl::deployment_controller[0m[2m:[0m Starting deployment/update for cluster: home-cluster
+[2m2025-09-17T03:13:07.320650Z[0m [32m INFO[0m [2mnokube::remote_ctl::deployment_controller[0m[2m:[0m Preparing binary dependencies and Docker image
+[2m2025-09-17T03:13:07.320694Z[0m [32m INFO[0m [2mnokube::remote_ctl::deployment_controller[0m[2m:[0m Building nokube image via dependency_img_build orchestrator, config=configs/images/nokube_base.yaml
+🚀 Starting Docker Layer Build System
+   Configuration: configs/images/nokube_base.yaml
+   Force rebuild: False
+   Loading cache configuration...
+   Cache config loaded
+   Initializing build orchestrator...
+   Dependency items: 13 -> apt:ca-certificates, apt:curl, apt:docker.io, apt:htop, apt:iotop, apt:net-tools, apt:python3, apt:python3-pip...
+
+✅ No dependency changes detected (checksum match). Skipping build.
+   Checksum: 17e007f5fc034d250d24aa30db3822d68babcdec0c56f793b87e2d686e8ac6d5
+[2m2025-09-17T03:13:07.591071Z[0m [32m INFO[0m [2mnokube::remote_ctl::deployment_controller[0m[2m:[0m Base image built via orchestrator (tag: nokube:base)
+[2m2025-09-17T03:13:11.761950Z[0m [32m INFO[0m [2mnokube::remote_ctl::deployment_controller[0m[2m:[0m Final image assembled and tagged: nokube:latest
+[2m2025-09-17T03:13:11.762008Z[0m [32m INFO[0m [2mnokube::remote_ctl::deployment_controller[0m[2m:[0m Exporting Docker image to tar file...
+[2m2025-09-17T03:13:32.946103Z[0m [32m INFO[0m [2mnokube::remote_ctl::deployment_controller[0m[2m:[0m Docker image exported to ./tmp/nokube-image.tar
+[2m2025-09-17T03:13:32.992408Z[0m [32m INFO[0m [2mnokube::remote_ctl::deployment_controller[0m[2m:[0m Dependencies and Docker image prepared
+[2m2025-09-17T03:13:32.992442Z[0m [32m INFO[0m [2mnokube::remote_ctl::deployment_controller[0m[2m:[0m Publishing artifacts to head node HTTP server directory
+[2m2025-09-17T03:13:33.240253Z[0m [32m INFO[0m [2mnokube::remote_ctl::ssh_manager[0m[2m:[0m Executing command on 10.126.126.235:2222: sudo -E mkdir -p /opt/devcon/pa/nokube-workspace/public_file_server/releases/nokube /opt/devcon/pa/nokube-workspace/public_file_server/releases/nokube/bin /opt/devcon/pa/nokube-workspace/public_file_server/releases/nokube/lib
+[2m2025-09-17T03:13:33.256122Z[0m [32m INFO[0m [2mnokube::remote_ctl::deployment_controller[0m[2m:[0m Uploading nokube-image.tar to head HTTP dir
+[2m2025-09-17T03:13:33.512344Z[0m [32m INFO[0m [2mnokube::remote_ctl::ssh_manager[0m[2m:[0m Uploading file ./tmp/nokube-image.tar to 10.126.126.235:2222:/opt/devcon/pa/nokube-workspace/public_file_server/releases/nokube/nokube-image.tar
+[2m2025-09-17T03:13:33.701170Z[0m [32m INFO[0m [2mnokube::remote_ctl::ssh_manager[0m[2m:[0m Executing command on 10.126.126.235:2222: sudo -E mkdir -p /opt/devcon/pa/nokube-workspace/public_file_server/releases/nokube
+[2m2025-09-17T03:13:33.967091Z[0m [32m INFO[0m [2mnokube::remote_ctl::ssh_manager[0m[2m:[0m Executing command on 10.126.126.235:2222: sudo -E chown -R pa:pa /opt/devcon/pa/nokube-workspace/public_file_server/releases/nokube
+[2m2025-09-17T03:13:34.456943Z[0m [32m INFO[0m [2mnokube::remote_ctl::ssh_manager[0m[2m:[0m Read 530170368 bytes from local file ./tmp/nokube-image.tar
+[2m2025-09-17T03:13:34.645149Z[0m [32m INFO[0m [2mnokube::remote_ctl::ssh_manager[0m[2m:[0m Executing command on 10.126.126.235:2222: sudo -E rm -f /opt/devcon/pa/nokube-workspace/public_file_server/releases/nokube/nokube-image.tar
+[2m2025-09-17T03:13:45.352470Z[0m [32m INFO[0m [2mnokube::remote_ctl::ssh_manager[0m[2m:[0m Successfully uploaded 530170368 bytes to 10.126.126.235:2222:/opt/devcon/pa/nokube-workspace/public_file_server/releases/nokube/nokube-image.tar
+[2m2025-09-17T03:13:45.645108Z[0m [32m INFO[0m [2mnokube::remote_ctl::ssh_manager[0m[2m:[0m Uploading file target/nokube to 10.126.126.235:2222:/opt/devcon/pa/nokube-workspace/public_file_server/releases/nokube/bin/nokube
+[2m2025-09-17T03:13:45.891162Z[0m [32m INFO[0m [2mnokube::remote_ctl::ssh_manager[0m[2m:[0m Executing command on 10.126.126.235:2222: sudo -E mkdir -p /opt/devcon/pa/nokube-workspace/public_file_server/releases/nokube/bin
+[2m2025-09-17T03:13:46.155176Z[0m [32m INFO[0m [2mnokube::remote_ctl::ssh_manager[0m[2m:[0m Executing command on 10.126.126.235:2222: sudo -E chown -R pa:pa /opt/devcon/pa/nokube-workspace/public_file_server/releases/nokube/bin
+[2m2025-09-17T03:13:46.186441Z[0m [32m INFO[0m [2mnokube::remote_ctl::ssh_manager[0m[2m:[0m Read 18215600 bytes from local file target/nokube
+[2m2025-09-17T03:13:46.376096Z[0m [32m INFO[0m [2mnokube::remote_ctl::ssh_manager[0m[2m:[0m Executing command on 10.126.126.235:2222: sudo -E rm -f /opt/devcon/pa/nokube-workspace/public_file_server/releases/nokube/bin/nokube
+[2m2025-09-17T03:13:46.851285Z[0m [32m INFO[0m [2mnokube::remote_ctl::ssh_manager[0m[2m:[0m Successfully uploaded 18215600 bytes to 10.126.126.235:2222:/opt/devcon/pa/nokube-workspace/public_file_server/releases/nokube/bin/nokube
+[2m2025-09-17T03:13:47.052600Z[0m [32m INFO[0m [2mnokube::remote_ctl::ssh_manager[0m[2m:[0m Uploading file ./tmp/nokube-remote-lib/libcrypto.so.1.1 to 10.126.126.235:2222:/opt/devcon/pa/nokube-workspace/public_file_server/releases/nokube/lib/libcrypto.so.1.1
+[2m2025-09-17T03:13:47.304125Z[0m [32m INFO[0m [2mnokube::remote_ctl::ssh_manager[0m[2m:[0m Executing command on 10.126.126.235:2222: sudo -E mkdir -p /opt/devcon/pa/nokube-workspace/public_file_server/releases/nokube/lib
+[2m2025-09-17T03:13:47.570176Z[0m [32m INFO[0m [2mnokube::remote_ctl::ssh_manager[0m[2m:[0m Executing command on 10.126.126.235:2222: sudo -E chown -R pa:pa /opt/devcon/pa/nokube-workspace/public_file_server/releases/nokube/lib
+[2m2025-09-17T03:13:47.588605Z[0m [32m INFO[0m [2mnokube::remote_ctl::ssh_manager[0m[2m:[0m Read 2917216 bytes from local file ./tmp/nokube-remote-lib/libcrypto.so.1.1
+[2m2025-09-17T03:13:47.836159Z[0m [32m INFO[0m [2mnokube::remote_ctl::ssh_manager[0m[2m:[0m Executing command on 10.126.126.235:2222: sudo -E rm -f /opt/devcon/pa/nokube-workspace/public_file_server/releases/nokube/lib/libcrypto.so.1.1
+[2m2025-09-17T03:13:47.885976Z[0m [32m INFO[0m [2mnokube::remote_ctl::ssh_manager[0m[2m:[0m Successfully uploaded 2917216 bytes to 10.126.126.235:2222:/opt/devcon/pa/nokube-workspace/public_file_server/releases/nokube/lib/libcrypto.so.1.1
+[2m2025-09-17T03:13:48.146973Z[0m [32m INFO[0m [2mnokube::remote_ctl::ssh_manager[0m[2m:[0m Uploading file ./tmp/nokube-remote-lib/libssl.so.1.1 to 10.126.126.235:2222:/opt/devcon/pa/nokube-workspace/public_file_server/releases/nokube/lib/libssl.so.1.1
+[2m2025-09-17T03:13:48.395186Z[0m [32m INFO[0m [2mnokube::remote_ctl::ssh_manager[0m[2m:[0m Executing command on 10.126.126.235:2222: sudo -E mkdir -p /opt/devcon/pa/nokube-workspace/public_file_server/releases/nokube/lib
+[2m2025-09-17T03:13:48.657150Z[0m [32m INFO[0m [2mnokube::remote_ctl::ssh_manager[0m[2m:[0m Executing command on 10.126.126.235:2222: sudo -E chown -R pa:pa /opt/devcon/pa/nokube-workspace/public_file_server/releases/nokube/lib
+[2m2025-09-17T03:13:48.673530Z[0m [32m INFO[0m [2mnokube::remote_ctl::ssh_manager[0m[2m:[0m Read 577312 bytes from local file ./tmp/nokube-remote-lib/libssl.so.1.1
+[2m2025-09-17T03:13:48.859130Z[0m [32m INFO[0m [2mnokube::remote_ctl::ssh_manager[0m[2m:[0m Executing command on 10.126.126.235:2222: sudo -E rm -f /opt/devcon/pa/nokube-workspace/public_file_server/releases/nokube/lib/libssl.so.1.1
+[2m2025-09-17T03:13:48.881385Z[0m [32m INFO[0m [2mnokube::remote_ctl::ssh_manager[0m[2m:[0m Successfully uploaded 577312 bytes to 10.126.126.235:2222:/opt/devcon/pa/nokube-workspace/public_file_server/releases/nokube/lib/libssl.so.1.1
+[2m2025-09-17T03:13:49.113596Z[0m [32m INFO[0m [2mnokube::remote_ctl::ssh_manager[0m[2m:[0m Uploading file ./tmp/nokube-artifacts-manifest.json to 10.126.126.235:2222:/opt/devcon/pa/nokube-workspace/public_file_server/releases/nokube/manifest.json
+[2m2025-09-17T03:13:49.299160Z[0m [32m INFO[0m [2mnokube::remote_ctl::ssh_manager[0m[2m:[0m Executing command on 10.126.126.235:2222: sudo -E mkdir -p /opt/devcon/pa/nokube-workspace/public_file_server/releases/nokube
+[2m2025-09-17T03:13:49.502134Z[0m [32m INFO[0m [2mnokube::remote_ctl::ssh_manager[0m[2m:[0m Executing command on 10.126.126.235:2222: sudo -E chown -R pa:pa /opt/devcon/pa/nokube-workspace/public_file_server/releases/nokube
+[2m2025-09-17T03:13:49.518151Z[0m [32m INFO[0m [2mnokube::remote_ctl::ssh_manager[0m[2m:[0m Read 190 bytes from local file ./tmp/nokube-artifacts-manifest.json
+[2m2025-09-17T03:13:49.704153Z[0m [32m INFO[0m [2mnokube::remote_ctl::ssh_manager[0m[2m:[0m Executing command on 10.126.126.235:2222: sudo -E rm -f /opt/devcon/pa/nokube-workspace/public_file_server/releases/nokube/manifest.json
+[2m2025-09-17T03:13:49.721200Z[0m [32m INFO[0m [2mnokube::remote_ctl::ssh_manager[0m[2m:[0m Successfully uploaded 190 bytes to 10.126.126.235:2222:/opt/devcon/pa/nokube-workspace/public_file_server/releases/nokube/manifest.json
+[2m2025-09-17T03:13:49.972182Z[0m [32m INFO[0m [2mnokube::remote_ctl::ssh_manager[0m[2m:[0m Executing command on 10.126.126.235:2222: sudo -E sh -lc 'set -e; mkdir -p /opt/devcon/pa/nokube-workspace/public_file_server; (docker rm -f nokube-httpserver >/dev/null 2>&1 || true); docker run -d --name nokube-httpserver -p 8088:8080 -v /opt/devcon/pa/nokube-workspace/public_file_server:/srv/http:ro python:3.10-slim python -m http.server 8080 --directory /srv/http'
+25eabfd9c1cb88511b9270d2a027b16a06975765b8acba1a444cb5f045288a05
+[2m2025-09-17T03:13:58.498298Z[0m [32m INFO[0m [2mnokube::remote_ctl::deployment_controller[0m[2m:[0m Artifacts published to head HTTP server directory: /opt/devcon/pa/nokube-workspace/public_file_server/releases/nokube
+[2m2025-09-17T03:13:58.498350Z[0m [32m INFO[0m [2mnokube::remote_ctl::deployment_controller[0m[2m:[0m HTTP server base URL: http://10.126.126.235:8088
+[2m2025-09-17T03:13:58.498380Z[0m [32m INFO[0m [2mnokube::remote_ctl::deployment_controller[0m[2m:[0m Deploying agents to cluster nodes
+[2m2025-09-17T03:13:58.498414Z[0m [32m INFO[0m [2mnokube::remote_ctl::deployment_controller[0m[2m:[0m Deploying to node dell-container with workspace: /opt/devcon/pa/nokube-workspace, storage: /opt/devcon/pa/nokube-workspace
+[2m2025-09-17T03:13:58.751181Z[0m [32m INFO[0m [2mnokube::remote_ctl::ssh_manager[0m[2m:[0m Executing command on 10.126.126.235:2222: sudo -E mkdir -p /opt/devcon/pa/nokube-workspace
+[2m2025-09-17T03:13:58.963098Z[0m [32m INFO[0m [2mnokube::remote_ctl::ssh_manager[0m[2m:[0m Executing command on 10.126.126.235:2222: sudo -E mkdir -p /opt/devcon/pa/nokube-workspace
+[2m2025-09-17T03:13:58.979083Z[0m [32m INFO[0m [2mnokube::remote_ctl::deployment_controller[0m[2m:[0m Downloading and loading Docker image on node: dell-container
+[2m2025-09-17T03:13:59.226152Z[0m [32m INFO[0m [2mnokube::remote_ctl::ssh_manager[0m[2m:[0m Executing command on 10.126.126.235:2222: sudo -E sh -lc 'set -e; (curl --noproxy "*" -fsSL http://10.126.126.235:8088/releases/nokube/nokube-image.tar -o /opt/devcon/pa/nokube-workspace/nokube-image.tar || wget --no-proxy -qO /opt/devcon/pa/nokube-workspace/nokube-image.tar http://10.126.126.235:8088/releases/nokube/nokube-image.tar); sudo docker load -i /opt/devcon/pa/nokube-workspace/nokube-image.tar'
+Loaded image: nokube:latest
+[2m2025-09-17T03:14:05.043398Z[0m [32m INFO[0m [2mnokube::remote_ctl::deployment_controller[0m[2m:[0m Downloading nokube binary on node: dell-container
+[2m2025-09-17T03:14:05.290202Z[0m [32m INFO[0m [2mnokube::remote_ctl::ssh_manager[0m[2m:[0m Executing command on 10.126.126.235:2222: sudo -E sh -lc 'set -e; mkdir -p /opt/devcon/pa/nokube-workspace/nokube-remote-lib; (curl --noproxy "*" -fsSL http://10.126.126.235:8088/releases/nokube/bin/nokube -o /opt/devcon/pa/nokube-workspace/nokube-remote-lib/nokube || wget --no-proxy -qO /opt/devcon/pa/nokube-workspace/nokube-remote-lib/nokube http://10.126.126.235:8088/releases/nokube/bin/nokube); chmod +x /opt/devcon/pa/nokube-workspace/nokube-remote-lib/nokube'
+[2m2025-09-17T03:14:05.550159Z[0m [32m INFO[0m [2mnokube::remote_ctl::ssh_manager[0m[2m:[0m Executing command on 10.126.126.235:2222: sudo -E sh -lc '(curl -fsSL http://10.126.126.235:8088/releases/nokube/lib/libcrypto.so.1.1 -o /opt/devcon/pa/nokube-workspace/nokube-remote-lib/libcrypto.so.1.1 || wget -qO /opt/devcon/pa/nokube-workspace/nokube-remote-lib/libcrypto.so.1.1 http://10.126.126.235:8088/releases/nokube/lib/libcrypto.so.1.1 || true); (curl -fsSL http://10.126.126.235:8088/releases/nokube/lib/libssl.so.1.1 -o /opt/devcon/pa/nokube-workspace/nokube-remote-lib/libssl.so.1.1 || wget -qO /opt/devcon/pa/nokube-workspace/nokube-remote-lib/lib/libssl.so.1.1 http://10.126.126.235:8088/releases/nokube/lib/libssl.so.1.1 || true)'
+[2m2025-09-17T03:14:05.853118Z[0m [32m INFO[0m [2mnokube::remote_ctl::ssh_manager[0m[2m:[0m Executing command on 10.126.126.235:2222: sudo -E mkdir -p /opt/devcon/pa/nokube-workspace/config
+[2m2025-09-17T03:14:06.127930Z[0m [32m INFO[0m [2mnokube::remote_ctl::ssh_manager[0m[2m:[0m Uploading file /etc/.nokube/config.yaml to 10.126.126.235:2222:/opt/devcon/pa/nokube-workspace/config/config.yaml
+[2m2025-09-17T03:14:06.374196Z[0m [32m INFO[0m [2mnokube::remote_ctl::ssh_manager[0m[2m:[0m Executing command on 10.126.126.235:2222: sudo -E mkdir -p /opt/devcon/pa/nokube-workspace/config
+[2m2025-09-17T03:14:06.588172Z[0m [32m INFO[0m [2mnokube::remote_ctl::ssh_manager[0m[2m:[0m Executing command on 10.126.126.235:2222: sudo -E chown -R pa:pa /opt/devcon/pa/nokube-workspace/config
+[2m2025-09-17T03:14:06.603040Z[0m [32m INFO[0m [2mnokube::remote_ctl::ssh_manager[0m[2m:[0m Read 47 bytes from local file /etc/.nokube/config.yaml
+[2m2025-09-17T03:14:06.850134Z[0m [32m INFO[0m [2mnokube::remote_ctl::ssh_manager[0m[2m:[0m Executing command on 10.126.126.235:2222: sudo -E rm -f /opt/devcon/pa/nokube-workspace/config/config.yaml
+[2m2025-09-17T03:14:06.866765Z[0m [32m INFO[0m [2mnokube::remote_ctl::ssh_manager[0m[2m:[0m Successfully uploaded 47 bytes to 10.126.126.235:2222:/opt/devcon/pa/nokube-workspace/config/config.yaml
+[2m2025-09-17T03:14:06.868094Z[0m [32m INFO[0m [2mnokube::remote_ctl::deployment_controller[0m[2m:[0m Adding Grafana configuration for head node: dell-container
+[2m2025-09-17T03:14:07.057064Z[0m [32m INFO[0m [2mnokube::remote_ctl::ssh_manager[0m[2m:[0m Executing command on 10.126.126.235:2222: sudo -E LD_LIBRARY_PATH=/opt/devcon/pa/nokube-workspace/nokube-remote-lib /opt/devcon/pa/nokube-workspace/nokube-remote-lib/nokube agent-command --extra-params eyJjbHVzdGVyX25hbWUiOiJob21lLWNsdXN0ZXIiLCJncmFmYW5hX2NvbmZpZyI6IltzZXJ2ZXJdXG5odHRwX3BvcnQgPSAzMDAwXG5cbltzZWN1cml0eV1cbmFkbWluX3VzZXIgPSBhZG1pblxuYWRtaW5fcGFzc3dvcmQgPSBhZG1pblxuXG5bdXNlcnNdXG5hbGxvd19zaWduX3VwID0gZmFsc2VcblxuW2F1dGguYW5vbnltb3VzXVxuZW5hYmxlZCA9IHRydWVcbm9yZ19uYW1lID0gTWFpbiBPcmcuXG5vcmdfcm9sZSA9IFZpZXdlclxuXG5bZGF0YXNvdXJjZXNdXG5uYW1lID0gR3JlcHRpbWVEQlxudHlwZSA9IHByb21ldGhldXNcbnVybCA9IGh0dHA6Ly8xMC4xMjYuMTI2LjIzNTo0MDEwXG5hY2Nlc3MgPSBwcm94eVxuaXNEZWZhdWx0ID0gdHJ1ZVxuIiwiZ3JhZmFuYV9wb3J0IjozMDEwLCJncmVwdGltZWRiX3BvcnQiOjQwMTAsIm5vZGVfaWQiOiJkZWxsLWNvbnRhaW5lciIsIm5vZGVfaXAiOiIxMC4xMjYuMTI2LjIzNSIsInNldHVwX2dyYWZhbmEiOnRydWUsIndvcmtzcGFjZSI6Ii9vcHQvZGV2Y29uL3BhL25va3ViZS13b3Jrc3BhY2UifQ==
+[2m2025-09-17T03:14:07.082650Z[0m [32m INFO[0m [2mnokube[0m[2m:[0m Running agent in command mode
+[2m2025-09-17T03:14:07.082738Z[0m [32m INFO[0m [2mnokube::config::config_manager[0m[2m:[0m Loading nokube configuration...
+[2m2025-09-17T03:14:07.082760Z[0m [32m INFO[0m [2mnokube::config::config_manager[0m[2m:[0m Using discovered config: /etc/.nokube/config.yaml
+[2m2025-09-17T03:14:07.082870Z[0m [32m INFO[0m [2mnokube::config::config_manager[0m[2m:[0m Creating EtcdManager with endpoints: ["http://10.126.126.235:2579"]
+[2m2025-09-17T03:14:07.082881Z[0m [32m INFO[0m [2mnokube::config::etcd_manager[0m[2m:[0m Initializing EtcdManager with endpoints: ["http://10.126.126.235:2579"]
+[2m2025-09-17T03:14:07.082885Z[0m [32m INFO[0m [2mnokube::config::etcd_manager[0m[2m:[0m Creating etcd client configuration...
+[2m2025-09-17T03:14:07.082888Z[0m [32m INFO[0m [2mnokube::config::etcd_manager[0m[2m:[0m Attempting to connect to etcd...
+[2m2025-09-17T03:14:07.083012Z[0m [32m INFO[0m [2mnokube::config::etcd_manager[0m[2m:[0m Successfully connected to etcd!
+[2m2025-09-17T03:14:07.083019Z[0m [32m INFO[0m [2mnokube::config::config_manager[0m[2m:[0m ConfigManager initialized successfully
+[REALTIME] 🚀 Starting command mode agent execution
+[2m2025-09-17T03:14:07.085093Z[0m [32m INFO[0m [2mnokube::agent::command_mode_agent[0m[2m:[0m Starting command mode agent execution
+[2m2025-09-17T03:14:07.085099Z[0m [32m INFO[0m [2mnokube::config::config_manager[0m[2m:[0m Loading nokube configuration...
+[2m2025-09-17T03:14:07.085116Z[0m [32m INFO[0m [2mnokube::config::config_manager[0m[2m:[0m Using discovered config: /etc/.nokube/config.yaml
+[2m2025-09-17T03:14:07.085168Z[0m [32m INFO[0m [2mnokube::config::config_manager[0m[2m:[0m Creating EtcdManager with endpoints: ["http://10.126.126.235:2579"]
+[2m2025-09-17T03:14:07.085176Z[0m [32m INFO[0m [2mnokube::config::etcd_manager[0m[2m:[0m Initializing EtcdManager with endpoints: ["http://10.126.126.235:2579"]
+[2m2025-09-17T03:14:07.085180Z[0m [32m INFO[0m [2mnokube::config::etcd_manager[0m[2m:[0m Creating etcd client configuration...
+[2m2025-09-17T03:14:07.085182Z[0m [32m INFO[0m [2mnokube::config::etcd_manager[0m[2m:[0m Attempting to connect to etcd...
+[2m2025-09-17T03:14:07.085214Z[0m [32m INFO[0m [2mnokube::config::etcd_manager[0m[2m:[0m Successfully connected to etcd!
+[2m2025-09-17T03:14:07.085219Z[0m [32m INFO[0m [2mnokube::config::config_manager[0m[2m:[0m ConfigManager initialized successfully
+[REALTIME] ⚙️ Configuring environment...
+[2m2025-09-17T03:14:07.086681Z[0m [32m INFO[0m [2mnokube::agent::command_mode_agent[0m[2m:[0m Configuring environment
+[2m2025-09-17T03:14:07.088221Z[0m [32m INFO[0m [2mnokube::agent::command_mode_agent[0m[2m:[0m Environment configuration completed with workspace: /opt/devcon/pa/nokube-workspace
+[2m2025-09-17T03:14:07.088230Z[0m [32m INFO[0m [2mnokube::agent::command_mode_agent[0m[2m:[0m Configuring APT sources from cluster config
+[2m2025-09-17T03:14:09.314035Z[0m [32m INFO[0m [2mnokube::agent::command_mode_agent[0m[2m:[0m APT sources configured and apt-get update completed
+[REALTIME] 📦 Installing dependencies...
+[2m2025-09-17T03:14:09.314066Z[0m [32m INFO[0m [2mnokube::agent::command_mode_agent[0m[2m:[0m Installing dependencies
+[2m2025-09-17T03:14:09.314074Z[0m [32m INFO[0m [2mnokube::agent::command_mode_agent[0m[2m:[0m Installing apt package: htop
+[2m2025-09-17T03:14:11.346421Z[0m [32m INFO[0m [2mnokube::agent::command_mode_agent[0m[2m:[0m Successfully installed apt package: htop
+[2m2025-09-17T03:14:11.346445Z[0m [32m INFO[0m [2mnokube::agent::command_mode_agent[0m[2m:[0m Installing apt package: iotop
+[2m2025-09-17T03:14:13.377769Z[0m [32m INFO[0m [2mnokube::agent::command_mode_agent[0m[2m:[0m Successfully installed apt package: iotop
+[2m2025-09-17T03:14:13.377793Z[0m [32m INFO[0m [2mnokube::agent::command_mode_agent[0m[2m:[0m Installing apt package: net-tools
+[2m2025-09-17T03:14:15.374433Z[0m [32m INFO[0m [2mnokube::agent::command_mode_agent[0m[2m:[0m Successfully installed apt package: net-tools
+[2m2025-09-17T03:14:15.374461Z[0m [32m INFO[0m [2mnokube::agent::command_mode_agent[0m[2m:[0m Dependencies installation completed
+[REALTIME] 🐳 Setting up Docker container service...
+[2m2025-09-17T03:14:15.374477Z[0m [32m INFO[0m [2mnokube::agent::command_mode_agent[0m[2m:[0m Setting up Docker container service
+[2m2025-09-17T03:14:16.809641Z[0m [32m INFO[0m [2mnokube::agent::command_mode_agent[0m[2m:[0m Stopped existing nokube-agent container
+[2m2025-09-17T03:14:16.948413Z[0m [32m INFO[0m [2mnokube::agent::command_mode_agent[0m[2m:[0m Removed existing nokube-agent container
+[2m2025-09-17T03:14:18.841365Z[0m [32m INFO[0m [2mnokube::agent::command_mode_agent[0m[2m:[0m Docker container service configured and started
+[REALTIME] 📋 Setting up Grafana if needed...
+[REALTIME] �� Setting up Grafana as requested in extra params
+[2m2025-09-17T03:14:18.841402Z[0m [32m INFO[0m [2mnokube::agent::command_mode_agent[0m[2m:[0m Setting up Grafana as requested in extra params
+[REALTIME] 📝 Grafana config file created at /opt/devcon/pa/nokube-workspace/config/grafana.ini
+[2m2025-09-17T03:14:18.841661Z[0m [32m INFO[0m [2mnokube::agent::command_mode_agent[0m[2m:[0m Grafana config file created at /opt/devcon/pa/nokube-workspace/config/grafana.ini
+[2m2025-09-17T03:14:18.841826Z[0m [32m INFO[0m [2mnokube::agent::command_mode_agent[0m[2m:[0m Grafana datasource provisioning written at /opt/devcon/pa/nokube-workspace/config/provisioning/datasources/nokube-datasource.yaml
+[2m2025-09-17T03:14:21.369022Z[0m [32m INFO[0m [2mnokube::agent::command_mode_agent[0m[2m:[0m Stopped existing Grafana container
+[2m2025-09-17T03:14:21.641368Z[0m [32m INFO[0m [2mnokube::agent::command_mode_agent[0m[2m:[0m Removed existing Grafana container
+[REALTIME] 🐳 Grafana container started with ID: e26498bf3f68916e812d85f1be4746db964cad004bb1c2a3380350ccd75d35b3
+[2m2025-09-17T03:14:24.639008Z[0m [32m INFO[0m [2mnokube::agent::command_mode_agent[0m[2m:[0m Grafana container started with ID: e26498bf3f68916e812d85f1be4746db964cad004bb1c2a3380350ccd75d35b3
+[2m2025-09-17T03:14:24.674669Z[0m [32m INFO[0m [2mnokube::agent::command_mode_agent[0m[2m:[0m Verified Grafana container is running (ID: e26498bf3f68)
+[REALTIME] ⏳ Checking if Grafana is responding on 10.126.126.235:3010
+[2m2025-09-17T03:14:24.674705Z[0m [32m INFO[0m [2mnokube::agent::command_mode_agent[0m[2m:[0m Checking if Grafana is responding on 10.126.126.235:3010
+[REALTIME] ✅ Grafana is responding on 10.126.126.235:3010
+[2m2025-09-17T03:15:46.872076Z[0m [32m INFO[0m [2mnokube::agent::command_mode_agent[0m[2m:[0m Grafana is responding on 10.126.126.235:3010
+[REALTIME] 📊 Setting up GreptimeDB...
+[2m2025-09-17T03:15:46.872106Z[0m [32m INFO[0m [2mnokube::agent::command_mode_agent[0m[2m:[0m Setting up GreptimeDB if needed
+[2m2025-09-17T03:15:46.911143Z[0m [32m INFO[0m [2mnokube::agent::command_mode_agent[0m[2m:[0m GreptimeDB container already running; restarting to apply config
+[2m2025-09-17T03:15:46.911272Z[0m [32m INFO[0m [2mnokube::agent::command_mode_agent[0m[2m:[0m Starting GreptimeDB container on port 4010
+[2m2025-09-17T03:15:49.203674Z[0m [32m INFO[0m [2mnokube::agent::command_mode_agent[0m[2m:[0m Attempting to start GreptimeDB on base port 4010
+[2m2025-09-17T03:15:51.918726Z[0m [32m INFO[0m [2mnokube::agent::command_mode_agent[0m[2m:[0m GreptimeDB container started with ID: ca09bf08ac00
+[2m2025-09-17T03:16:01.959204Z[0m [32m INFO[0m [2mnokube::agent::command_mode_agent[0m[2m:[0m GreptimeDB is running and ready
+[REALTIME] ✅ GreptimeDB setup completed on port 4010
+[2m2025-09-17T03:16:01.959239Z[0m [32m INFO[0m [2mnokube::agent::command_mode_agent[0m[2m:[0m GreptimeDB setup completed on port 4010
+[REALTIME] Starting Grafana datasource and dashboard configuration...
+[REALTIME] 🎛️ Setting up Grafana datasource and dashboard
+[2m2025-09-17T03:16:01.959251Z[0m [32m INFO[0m [2mnokube::agent::command_mode_agent[0m[2m:[0m Setting up Grafana datasource and dashboard
+[REALTIME] ⏳ Waiting 15 seconds for Grafana to fully start...
+[REALTIME] 🔌 Configuring datasource with endpoint: http://10.126.126.235:4010/v1/prometheus
+[REALTIME] ⚠️ Datasource already exists; continuing
+[2m2025-09-17T03:16:17.021246Z[0m [32m INFO[0m [2mnokube::agent::command_mode_agent[0m[2m:[0m Datasource already exists; continuing
+[REALTIME] 📊 Importing NoKube dashboards (Cluster + Actor)...
+[REALTIME] 📋 Importing NoKube Cluster Monitoring dashboard...
+[REALTIME] 📋 Importing NoKube cluster monitoring dashboard
+[2m2025-09-17T03:16:17.370695Z[0m [32m INFO[0m [2mnokube::agent::command_mode_agent[0m[2m:[0m Importing NoKube cluster monitoring dashboard
+[REALTIME] ✅ Successfully imported NoKube cluster monitoring dashboard
+[2m2025-09-17T03:16:17.680465Z[0m [32m INFO[0m [2mnokube::agent::command_mode_agent[0m[2m:[0m Successfully imported NoKube cluster monitoring dashboard
+[REALTIME] 📋 Importing NoKube Actor Dashboard (K8s objects, services, containers)...
+[REALTIME] 📋 Importing NoKube Actor Dashboard (root-actor rows, absolute metrics)
+[2m2025-09-17T03:16:19.682705Z[0m [32m INFO[0m [2mnokube::agent::command_mode_agent[0m[2m:[0m Importing NoKube Actor Dashboard (root-actor rows, absolute metrics)
+[REALTIME] ✅ Successfully imported NoKube Actor Dashboard (root-actor rows, absolute metrics)
+[2m2025-09-17T03:16:19.999970Z[0m [32m INFO[0m [2mnokube::agent::command_mode_agent[0m[2m:[0m Successfully imported NoKube Actor Dashboard (root-actor rows, absolute metrics)
+[REALTIME] 🔌 Ensuring MySQL datasource for GreptimeDB logs...
+[REALTIME] 📋 Importing NoKube Logs (MySQL) dashboard...
+[REALTIME] 🏠 Set cluster dashboard as home
+[REALTIME] 🎉 All Grafana setup completed successfully!
+[REALTIME] ✅ Grafana datasource and dashboard configured successfully
+[2m2025-09-17T03:16:20.846847Z[0m [32m INFO[0m [2mnokube::agent::command_mode_agent[0m[2m:[0m Grafana datasource and dashboard configured successfully
+[REALTIME] ✅ Command mode agent execution completed successfully!
+[2m2025-09-17T03:16:20.848476Z[0m [32m INFO[0m [2mnokube::agent::command_mode_agent[0m[2m:[0m Command mode agent execution completed
+[2m2025-09-17T03:16:20.848495Z[0m [32m INFO[0m [2mnokube[0m[2m:[0m Command mode agent completed successfully
+[2m2025-09-17T03:16:20.856714Z[0m [32m INFO[0m [2mnokube::remote_ctl::deployment_controller[0m[2m:[0m Agent deployed successfully on node: dell-container
+[2m2025-09-17T03:16:20.856753Z[0m [32m INFO[0m [2mnokube::remote_ctl::deployment_controller[0m[2m:[0m Updating node configurations
+[2m2025-09-17T03:16:21.107145Z[0m [32m INFO[0m [2mnokube::remote_ctl::ssh_manager[0m[2m:[0m Executing command on 10.126.126.235:2222: sudo -E mkdir -p /opt/devcon/pa/nokube-workspace/config
+[2m2025-09-17T03:16:21.379885Z[0m [32m INFO[0m [2mnokube::remote_ctl::ssh_manager[0m[2m:[0m Uploading file ./tmp/config/node_config.json to 10.126.126.235:2222:/opt/devcon/pa/nokube-workspace/config/node_config.json
+[2m2025-09-17T03:16:21.628113Z[0m [32m INFO[0m [2mnokube::remote_ctl::ssh_manager[0m[2m:[0m Executing command on 10.126.126.235:2222: sudo -E mkdir -p /opt/devcon/pa/nokube-workspace/config
+[2m2025-09-17T03:16:21.893166Z[0m [32m INFO[0m [2mnokube::remote_ctl::ssh_manager[0m[2m:[0m Executing command on 10.126.126.235:2222: sudo -E chown -R pa:pa /opt/devcon/pa/nokube-workspace/config
+[2m2025-09-17T03:16:21.909419Z[0m [32m INFO[0m [2mnokube::remote_ctl::ssh_manager[0m[2m:[0m Read 1203 bytes from local file ./tmp/config/node_config.json
+[2m2025-09-17T03:16:22.158156Z[0m [32m INFO[0m [2mnokube::remote_ctl::ssh_manager[0m[2m:[0m Executing command on 10.126.126.235:2222: sudo -E rm -f /opt/devcon/pa/nokube-workspace/config/node_config.json
+[2m2025-09-17T03:16:22.175033Z[0m [32m INFO[0m [2mnokube::remote_ctl::ssh_manager[0m[2m:[0m Successfully uploaded 1203 bytes to 10.126.126.235:2222:/opt/devcon/pa/nokube-workspace/config/node_config.json
+[2m2025-09-17T03:16:22.424163Z[0m [32m INFO[0m [2mnokube::remote_ctl::ssh_manager[0m[2m:[0m Executing command on 10.126.126.235:2222: sudo -E docker restart nokube-agent-container
+[2m2025-09-17T03:16:23.372142Z[0m [32m INFO[0m [2mnokube::remote_ctl::deployment_controller[0m[2m:[0m Configuration updated for node: dell-container
+[2m2025-09-17T03:16:23.372173Z[0m [32m INFO[0m [2mnokube::remote_ctl::deployment_controller[0m[2m:[0m Deploying bound services
+[2m2025-09-17T03:16:23.372183Z[0m [32m INFO[0m [2mnokube::remote_ctl::deployment_controller[0m[2m:[0m Bound services (Grafana, GreptimeDB) are managed by node agents
+[2m2025-09-17T03:16:23.372251Z[0m [32m INFO[0m [2mnokube::remote_ctl::deployment_controller[0m[2m:[0m 
++------------+----------------------------+
+| name       | url                        |
++------------+----------------------------+
+| grafana    | http://10.126.126.235:3010 |
++------------+----------------------------+
+| greptimedb | http://10.126.126.235:4010 |
++------------+----------------------------+
+| httpserver | http://10.126.126.235:8088 |
++------------+----------------------------+
+[2m2025-09-17T03:16:23.372262Z[0m [32m INFO[0m [2mnokube::remote_ctl::deployment_controller[0m[2m:[0m Deployment/update completed for cluster: home-cluster
+[2m2025-09-17T03:16:23.372351Z[0m [32m INFO[0m [2mnokube[0m[2m:[0m Cluster home-cluster deployed/updated successfully
+[2m2025-09-17T03:16:23.372396Z[0m [32m INFO[0m [2mnokube[0m[2m:[0m Re-importing Grafana dashboards for cluster: home-cluster
+[2m2025-09-17T03:16:23.372462Z[0m [32m INFO[0m [2mnokube[0m[2m:[0m Running agent in command mode
+[2m2025-09-17T03:16:23.372489Z[0m [32m INFO[0m [2mnokube::config::config_manager[0m[2m:[0m Loading nokube configuration...
+[2m2025-09-17T03:16:23.372516Z[0m [32m INFO[0m [2mnokube::config::config_manager[0m[2m:[0m Using discovered config: /etc/.nokube/config.yaml
+[2m2025-09-17T03:16:23.372588Z[0m [32m INFO[0m [2mnokube::config::config_manager[0m[2m:[0m Creating EtcdManager with endpoints: ["http://10.126.126.235:2579"]
+[2m2025-09-17T03:16:23.372622Z[0m [32m INFO[0m [2mnokube::config::etcd_manager[0m[2m:[0m Initializing EtcdManager with endpoints: ["http://10.126.126.235:2579"]
+[2m2025-09-17T03:16:23.372628Z[0m [32m INFO[0m [2mnokube::config::etcd_manager[0m[2m:[0m Creating etcd client configuration...
+[2m2025-09-17T03:16:23.372634Z[0m [32m INFO[0m [2mnokube::config::etcd_manager[0m[2m:[0m Attempting to connect to etcd...
+[2m2025-09-17T03:16:23.372768Z[0m [32m INFO[0m [2mnokube::config::etcd_manager[0m[2m:[0m Successfully connected to etcd!
+[2m2025-09-17T03:16:23.372779Z[0m [32m INFO[0m [2mnokube::config::config_manager[0m[2m:[0m ConfigManager initialized successfully
+[REALTIME] 🚀 Starting command mode agent execution
+[2m2025-09-17T03:16:23.374681Z[0m [32m INFO[0m [2mnokube::agent::command_mode_agent[0m[2m:[0m Starting command mode agent execution
+[2m2025-09-17T03:16:23.374708Z[0m [32m INFO[0m [2mnokube::config::config_manager[0m[2m:[0m Loading nokube configuration...
+[2m2025-09-17T03:16:23.374729Z[0m [32m INFO[0m [2mnokube::config::config_manager[0m[2m:[0m Using discovered config: /etc/.nokube/config.yaml
+[2m2025-09-17T03:16:23.374790Z[0m [32m INFO[0m [2mnokube::config::config_manager[0m[2m:[0m Creating EtcdManager with endpoints: ["http://10.126.126.235:2579"]
+[2m2025-09-17T03:16:23.374801Z[0m [32m INFO[0m [2mnokube::config::etcd_manager[0m[2m:[0m Initializing EtcdManager with endpoints: ["http://10.126.126.235:2579"]
+[2m2025-09-17T03:16:23.374806Z[0m [32m INFO[0m [2mnokube::config::etcd_manager[0m[2m:[0m Creating etcd client configuration...
+[2m2025-09-17T03:16:23.374810Z[0m [32m INFO[0m [2mnokube::config::etcd_manager[0m[2m:[0m Attempting to connect to etcd...
+[2m2025-09-17T03:16:23.374842Z[0m [32m INFO[0m [2mnokube::config::etcd_manager[0m[2m:[0m Successfully connected to etcd!
+[2m2025-09-17T03:16:23.374850Z[0m [32m INFO[0m [2mnokube::config::config_manager[0m[2m:[0m ConfigManager initialized successfully
+[REALTIME] ⚙️ Configuring environment...
+[2m2025-09-17T03:16:23.376129Z[0m [32m INFO[0m [2mnokube::agent::command_mode_agent[0m[2m:[0m Configuring environment
+[2m2025-09-17T03:16:23.378595Z[0m [32m INFO[0m [2mnokube::agent::command_mode_agent[0m[2m:[0m Environment configuration completed with workspace: /opt/devcon/pa/nokube-workspace
+[2m2025-09-17T03:16:23.378614Z[0m [32m INFO[0m [2mnokube::agent::command_mode_agent[0m[2m:[0m Configuring APT sources from cluster config
+[2m2025-09-17T03:16:23.378835Z[0m [31mERROR[0m [2mnokube[0m[2m:[0m Command mode agent failed: Failed to write /etc/apt/sources.list: Permission denied (os error 13)
+[2m2025-09-17T03:16:23.378856Z[0m [33m WARN[0m [2mnokube[0m[2m:[0m Post-update Grafana dashboard import failed: Agent error: Command mode execution failed: Failed to write /etc/apt/sources.list: Permission denied (os error 13)
+✅ Build successful! Running nokube...
