@@ -72,8 +72,9 @@ impl SSHManager {
         require_root: bool,
         show_progress: bool,
     ) -> Result<String> {
-        let sess = self.connect().await
-            .map_err(|e| anyhow::anyhow!("Failed to establish SSH connection to {}: {}", self.host, e))?;
+        let sess = self.connect().await.map_err(|e| {
+            anyhow::anyhow!("Failed to establish SSH connection to {}: {}", self.host, e)
+        })?;
         let mut channel = sess.channel_session()?;
         let shell_cmd = if require_root && self.username != "root" {
             // 使用完整的sudo命令，确保环境变量传递和错误处理
@@ -136,10 +137,16 @@ impl SSHManager {
     /// - 如目标文件已存在，将先尝试删除（`rm -f`）
     /// - 失败信息包含详细的 stdout/stderr 以便排障
     pub async fn upload_file(&self, local_path: &str, remote_path: &str) -> Result<()> {
-        let sess = self.connect().await
-            .map_err(|e| anyhow::anyhow!("Failed to establish SSH connection to {}: {}", self.host, e))?;
-        let sftp = sess.sftp()
-            .map_err(|e| anyhow::anyhow!("Failed to establish SFTP session with {}: {:?}", self.host, e))?;
+        let sess = self.connect().await.map_err(|e| {
+            anyhow::anyhow!("Failed to establish SSH connection to {}: {}", self.host, e)
+        })?;
+        let sftp = sess.sftp().map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to establish SFTP session with {}: {:?}",
+                self.host,
+                e
+            )
+        })?;
 
         info!(
             "Uploading file {} to {}:{}",
@@ -153,7 +160,9 @@ impl SSHManager {
                 // 创建目录 - 启用 show_progress 捕获错误详情
                 self.execute_command(&format!("mkdir -p {}", parent_str), true, true)
                     .await
-                    .map_err(|e| anyhow::anyhow!("Failed to create parent directory {}: {}", parent_str, e))?;
+                    .map_err(|e| {
+                        anyhow::anyhow!("Failed to create parent directory {}: {}", parent_str, e)
+                    })?;
                 // 修正权限 - 启用 show_progress 捕获错误详情
                 self.execute_command(
                     &format!(
@@ -164,25 +173,55 @@ impl SSHManager {
                     true,
                 )
                 .await
-                .map_err(|e| anyhow::anyhow!("Failed to set ownership for directory {}: {}", parent_str, e))?;
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "Failed to set ownership for directory {}: {}",
+                        parent_str,
+                        e
+                    )
+                })?;
             }
         }
 
         let local_content = std::fs::read(local_path)
             .map_err(|e| anyhow::anyhow!("Failed to read local file {}: {}", local_path, e))?;
-        
-        info!("Read {} bytes from local file {}", local_content.len(), local_path);
-        
-        // 删除远程文件（如果存在） - 启用 show_progress 捕获错误
-        let _ = self.execute_command(&format!("rm -f {}", remote_path), true, true).await;
-        
-        let mut remote_file = sftp.create(Path::new(remote_path))
-            .map_err(|e| anyhow::anyhow!("Failed to create remote file {} on {}: SFTP error: {:?}", remote_path, self.host, e))?;
-        
-        std::io::Write::write_all(&mut remote_file, &local_content)
-            .map_err(|e| anyhow::anyhow!("Failed to write {} bytes to remote file {} on {}: {}", local_content.len(), remote_path, self.host, e))?;
 
-        info!("Successfully uploaded {} bytes to {}:{}", local_content.len(), self.host, remote_path);
+        info!(
+            "Read {} bytes from local file {}",
+            local_content.len(),
+            local_path
+        );
+
+        // 删除远程文件（如果存在） - 启用 show_progress 捕获错误
+        let _ = self
+            .execute_command(&format!("rm -f {}", remote_path), true, true)
+            .await;
+
+        let mut remote_file = sftp.create(Path::new(remote_path)).map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to create remote file {} on {}: SFTP error: {:?}",
+                remote_path,
+                self.host,
+                e
+            )
+        })?;
+
+        std::io::Write::write_all(&mut remote_file, &local_content).map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to write {} bytes to remote file {} on {}: {}",
+                local_content.len(),
+                remote_path,
+                self.host,
+                e
+            )
+        })?;
+
+        info!(
+            "Successfully uploaded {} bytes to {}:{}",
+            local_content.len(),
+            self.host,
+            remote_path
+        );
         Ok(())
     }
 
@@ -194,10 +233,16 @@ impl SSHManager {
     /// - 先执行 `rm -f <remote_path>` 确保替换
     /// - 若是 `nokube` 二进制，自动 `chmod +x`
     pub async fn force_upload_file(&self, local_path: &str, remote_path: &str) -> Result<()> {
-        let sess = self.connect().await
-            .map_err(|e| anyhow::anyhow!("Failed to establish SSH connection to {}: {}", self.host, e))?;
-        let sftp = sess.sftp()
-            .map_err(|e| anyhow::anyhow!("Failed to establish SFTP session with {}: {:?}", self.host, e))?;
+        let sess = self.connect().await.map_err(|e| {
+            anyhow::anyhow!("Failed to establish SSH connection to {}: {}", self.host, e)
+        })?;
+        let sftp = sess.sftp().map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to establish SFTP session with {}: {:?}",
+                self.host,
+                e
+            )
+        })?;
 
         info!(
             "Force uploading file {} to {}:{} (will delete existing file first)",
@@ -211,7 +256,9 @@ impl SSHManager {
                 // 创建目录
                 self.execute_command(&format!("mkdir -p {}", parent_str), true, true)
                     .await
-                    .map_err(|e| anyhow::anyhow!("Failed to create parent directory {}: {}", parent_str, e))?;
+                    .map_err(|e| {
+                        anyhow::anyhow!("Failed to create parent directory {}: {}", parent_str, e)
+                    })?;
                 // 修正权限
                 self.execute_command(
                     &format!(
@@ -222,40 +269,82 @@ impl SSHManager {
                     true,
                 )
                 .await
-                .map_err(|e| anyhow::anyhow!("Failed to set ownership for directory {}: {}", parent_str, e))?;
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "Failed to set ownership for directory {}: {}",
+                        parent_str,
+                        e
+                    )
+                })?;
             }
         }
 
         // 强制删除远程文件（包括只读文件）
-        info!("Forcefully removing existing file at {}:{}", self.host, remote_path);
-        let delete_result = self.execute_command(&format!("rm -f {}", remote_path), true, true).await;
+        info!(
+            "Forcefully removing existing file at {}:{}",
+            self.host, remote_path
+        );
+        let delete_result = self
+            .execute_command(&format!("rm -f {}", remote_path), true, true)
+            .await;
         match delete_result {
-            Ok(_) => info!("Successfully deleted existing file at {}:{}", self.host, remote_path),
+            Ok(_) => info!(
+                "Successfully deleted existing file at {}:{}",
+                self.host, remote_path
+            ),
             Err(e) => info!("File deletion failed (file may not exist): {}", e),
         }
 
         // 读取本地文件内容
         let local_content = std::fs::read(local_path)
             .map_err(|e| anyhow::anyhow!("Failed to read local file {}: {}", local_path, e))?;
-        
-        info!("Read {} bytes from local file {}", local_content.len(), local_path);
-        
+
+        info!(
+            "Read {} bytes from local file {}",
+            local_content.len(),
+            local_path
+        );
+
         // 创建新的远程文件
-        let mut remote_file = sftp.create(Path::new(remote_path))
-            .map_err(|e| anyhow::anyhow!("Failed to create remote file {} on {}: SFTP error: {:?}", remote_path, self.host, e))?;
-        
-        std::io::Write::write_all(&mut remote_file, &local_content)
-            .map_err(|e| anyhow::anyhow!("Failed to write {} bytes to remote file {} on {}: {}", local_content.len(), remote_path, self.host, e))?;
+        let mut remote_file = sftp.create(Path::new(remote_path)).map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to create remote file {} on {}: SFTP error: {:?}",
+                remote_path,
+                self.host,
+                e
+            )
+        })?;
+
+        std::io::Write::write_all(&mut remote_file, &local_content).map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to write {} bytes to remote file {} on {}: {}",
+                local_content.len(),
+                remote_path,
+                self.host,
+                e
+            )
+        })?;
 
         // 设置可执行权限（如果是二进制文件）
         if remote_path.ends_with("/nokube") || remote_path.ends_with("nokube") {
             info!("Setting executable permission for nokube binary");
             self.execute_command(&format!("chmod +x {}", remote_path), true, true)
                 .await
-                .map_err(|e| anyhow::anyhow!("Failed to set executable permission for {}: {}", remote_path, e))?;
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "Failed to set executable permission for {}: {}",
+                        remote_path,
+                        e
+                    )
+                })?;
         }
 
-        info!("Successfully force uploaded {} bytes to {}:{}", local_content.len(), self.host, remote_path);
+        info!(
+            "Successfully force uploaded {} bytes to {}:{}",
+            local_content.len(),
+            self.host,
+            remote_path
+        );
         Ok(())
     }
 
@@ -271,10 +360,16 @@ impl SSHManager {
         remote_dir: &str,
         require_root: bool,
     ) -> Result<()> {
-        let sess = self.connect().await
-            .map_err(|e| anyhow::anyhow!("Failed to establish SSH connection to {}: {}", self.host, e))?;
-        let sftp = sess.sftp()
-            .map_err(|e| anyhow::anyhow!("Failed to establish SFTP session with {}: {:?}", self.host, e))?;
+        let sess = self.connect().await.map_err(|e| {
+            anyhow::anyhow!("Failed to establish SSH connection to {}: {}", self.host, e)
+        })?;
+        let sftp = sess.sftp().map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to establish SFTP session with {}: {:?}",
+                self.host,
+                e
+            )
+        })?;
 
         info!(
             "Uploading directory {} to {}:{}",
@@ -289,8 +384,10 @@ impl SSHManager {
         // 使用远程命令创建目录 - 启用 show_progress 以捕获错误详情
         self.execute_command(&format!("mkdir -p {}", remote_dir), require_root, true)
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to create remote directory {}: {}", remote_dir, e))?;
-        
+            .map_err(|e| {
+                anyhow::anyhow!("Failed to create remote directory {}: {}", remote_dir, e)
+            })?;
+
         self.execute_command(
             &format!(
                 "chown -R {}:{} {}",
@@ -300,12 +397,26 @@ impl SSHManager {
             true,
         )
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to set ownership for remote directory {}: {}", remote_dir, e))?;
-        
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to set ownership for remote directory {}: {}",
+                remote_dir,
+                e
+            )
+        })?;
+
         // 上传所有文件
         self.upload_directory_recursive(&sess, &sftp, local_dir, remote_dir, require_root)
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to upload directory {} to {}:{}: {}", local_dir, self.host, remote_dir, e))?;
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to upload directory {} to {}:{}: {}",
+                    local_dir,
+                    self.host,
+                    remote_dir,
+                    e
+                )
+            })?;
 
         // 上传完成后统一 chown 到 ssh 用户，确保所有文件权限
         self.execute_command(
@@ -317,20 +428,41 @@ impl SSHManager {
             true,
         )
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to set final ownership for remote directory {}: {}", remote_dir, e))?;
-        
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to set final ownership for remote directory {}: {}",
+                remote_dir,
+                e
+            )
+        })?;
+
         // 再统一 chmod 700，保证所有文件可执行且安全
         self.execute_command(&format!("chmod -R 700 {}", remote_dir), require_root, true)
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to set permissions for remote directory {}: {}", remote_dir, e))?;
-            
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to set permissions for remote directory {}: {}",
+                    remote_dir,
+                    e
+                )
+            })?;
+
         // 确保 nokube 二进制有可执行权限
         let nokube_path = format!("{}/nokube", remote_dir);
         self.execute_command(&format!("chmod +x {}", nokube_path), require_root, true)
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to set executable permission for nokube binary {}: {}", nokube_path, e))?;
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to set executable permission for nokube binary {}: {}",
+                    nokube_path,
+                    e
+                )
+            })?;
 
-        info!("Directory upload completed: {} -> {}:{}", local_dir, self.host, remote_dir);
+        info!(
+            "Directory upload completed: {} -> {}:{}",
+            local_dir, self.host, remote_dir
+        );
         Ok(())
     }
 
@@ -346,10 +478,11 @@ impl SSHManager {
 
         let entries = std::fs::read_dir(local_dir)
             .map_err(|e| anyhow::anyhow!("Failed to read local directory {}: {}", local_dir, e))?;
-        
+
         for entry in entries {
-            let entry = entry
-                .map_err(|e| anyhow::anyhow!("Failed to read directory entry in {}: {}", local_dir, e))?;
+            let entry = entry.map_err(|e| {
+                anyhow::anyhow!("Failed to read directory entry in {}: {}", local_dir, e)
+            })?;
             let local_path = entry.path();
             let file_name = local_path.file_name().unwrap().to_str().unwrap();
             let remote_path = format!("{}/{}", remote_dir, file_name);
@@ -358,7 +491,9 @@ impl SSHManager {
                 // 递归前先用远程命令创建目录 - 启用 show_progress 捕获错误
                 self.execute_command(&format!("mkdir -p {}", remote_path), require_root, true)
                     .await
-                    .map_err(|e| anyhow::anyhow!("Failed to create remote directory {}: {}", remote_path, e))?;
+                    .map_err(|e| {
+                        anyhow::anyhow!("Failed to create remote directory {}: {}", remote_path, e)
+                    })?;
                 Box::pin(self.upload_directory_recursive(
                     sess,
                     sftp,
@@ -367,24 +502,57 @@ impl SSHManager {
                     require_root,
                 ))
                 .await
-                .map_err(|e| anyhow::anyhow!("Failed to upload subdirectory {} to {}: {}", local_path.display(), remote_path, e))?;
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "Failed to upload subdirectory {} to {}: {}",
+                        local_path.display(),
+                        remote_path,
+                        e
+                    )
+                })?;
             } else {
                 let local_path_str = local_path.to_str().unwrap();
-                let local_content = std::fs::read(&local_path)
-                    .map_err(|e| anyhow::anyhow!("Failed to read local file {}: {}", local_path_str, e))?;
-                
-                info!("Uploading file {} ({} bytes) to {}", local_path_str, local_content.len(), remote_path);
-                
+                let local_content = std::fs::read(&local_path).map_err(|e| {
+                    anyhow::anyhow!("Failed to read local file {}: {}", local_path_str, e)
+                })?;
+
+                info!(
+                    "Uploading file {} ({} bytes) to {}",
+                    local_path_str,
+                    local_content.len(),
+                    remote_path
+                );
+
                 // 删除远程文件（如果存在） - 启用 show_progress 捕获错误
-                let _ = self.execute_command(&format!("rm -f {}", remote_path), require_root, true).await;
-                
-                let mut remote_file = sftp.create(std::path::Path::new(&remote_path))
-                    .map_err(|e| anyhow::anyhow!("Failed to create remote file {} on {}: SFTP error: {:?}", remote_path, self.host, e))?;
-                
-                std::io::Write::write_all(&mut remote_file, &local_content)
-                    .map_err(|e| anyhow::anyhow!("Failed to write {} bytes to remote file {} on {}: {}", local_content.len(), remote_path, self.host, e))?;
-                
-                info!("Successfully uploaded file {} to {}", local_path_str, remote_path);
+                let _ = self
+                    .execute_command(&format!("rm -f {}", remote_path), require_root, true)
+                    .await;
+
+                let mut remote_file =
+                    sftp.create(std::path::Path::new(&remote_path))
+                        .map_err(|e| {
+                            anyhow::anyhow!(
+                                "Failed to create remote file {} on {}: SFTP error: {:?}",
+                                remote_path,
+                                self.host,
+                                e
+                            )
+                        })?;
+
+                std::io::Write::write_all(&mut remote_file, &local_content).map_err(|e| {
+                    anyhow::anyhow!(
+                        "Failed to write {} bytes to remote file {} on {}: {}",
+                        local_content.len(),
+                        remote_path,
+                        self.host,
+                        e
+                    )
+                })?;
+
+                info!(
+                    "Successfully uploaded file {} to {}",
+                    local_path_str, remote_path
+                );
             }
         }
         Ok(())

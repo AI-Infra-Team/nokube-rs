@@ -13,7 +13,7 @@ pub struct MasterAgent {
 impl MasterAgent {
     pub async fn new(cluster_config: ClusterConfig, etcd_endpoints: Vec<String>) -> Result<Self> {
         let etcd_manager = Arc::new(EtcdManager::new(etcd_endpoints).await?);
-        
+
         let remote_executor = if let Some(node) = cluster_config.nodes.first() {
             if let Some(proxy) = &node.proxy {
                 RemoteExecutor::with_proxy(proxy.clone())
@@ -23,7 +23,7 @@ impl MasterAgent {
         } else {
             RemoteExecutor::new()
         };
-        
+
         Ok(Self {
             cluster_config,
             remote_executor,
@@ -32,10 +32,13 @@ impl MasterAgent {
     }
 
     pub async fn start(&mut self) -> Result<()> {
-        info!("Starting master agent for cluster: {}", self.cluster_config.cluster_name);
-        
+        info!(
+            "Starting master agent for cluster: {}",
+            self.cluster_config.cluster_name
+        );
+
         self.store_cluster_config().await?;
-        
+
         info!("Master agent started successfully - only managing cluster config");
         Ok(())
     }
@@ -48,7 +51,9 @@ impl MasterAgent {
 
     async fn store_cluster_config(&self) -> Result<()> {
         info!("Storing cluster configuration to etcd");
-        self.etcd_manager.store_cluster_config(&self.cluster_config).await?;
+        self.etcd_manager
+            .store_cluster_config(&self.cluster_config)
+            .await?;
         Ok(())
     }
 
@@ -61,7 +66,7 @@ impl MasterAgent {
 
     pub async fn execute_cluster_command(&self, command: &str) -> Result<()> {
         info!("Executing cluster-wide command: {}", command);
-        
+
         for node in &self.cluster_config.nodes {
             match self.remote_executor.execute_command(command).await {
                 Ok(result) => {
@@ -72,7 +77,7 @@ impl MasterAgent {
                 }
             }
         }
-        
+
         Ok(())
     }
 }

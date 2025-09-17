@@ -64,7 +64,7 @@ pub struct AptSourcesConfig {
     /// 完整替换 /etc/apt/sources.list 的内容
     pub sources_list: Option<String>,
     /// 在 /etc/apt/sources.list.d/ 下新增的源文件集合（文件名 -> 内容）
-    pub sources_list_d: Option<HashMap<String, String>>, 
+    pub sources_list_d: Option<HashMap<String, String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -123,27 +123,34 @@ pub struct NokubeSpecificConfig {
 impl NodeConfig {
     /// 从 SSH URL 中提取节点的 IP 地址
     /// 例如: "pa@192.168.1.100:22" -> "192.168.1.100"
-    /// 或者: "192.168.1.100:22" -> "192.168.1.100" 
+    /// 或者: "192.168.1.100:22" -> "192.168.1.100"
     pub fn get_ip(&self) -> anyhow::Result<&str> {
         // 首先检查是否包含@符号
         let host_part = if self.ssh_url.contains('@') {
-            self.ssh_url.split('@').nth(1)
-                .ok_or_else(|| anyhow::anyhow!("Invalid SSH URL format after @: {}", self.ssh_url))?
+            self.ssh_url.split('@').nth(1).ok_or_else(|| {
+                anyhow::anyhow!("Invalid SSH URL format after @: {}", self.ssh_url)
+            })?
         } else {
             &self.ssh_url
         };
-        
+
         // 然后从主机部分提取IP（去掉端口）
-        let ip = host_part.split(':').next()
+        let ip = host_part
+            .split(':')
+            .next()
             .ok_or_else(|| anyhow::anyhow!("Invalid host format in SSH URL: {}", self.ssh_url))?;
-            
+
         Ok(ip)
     }
 
     /// 获取节点的工作空间路径，如果未指定则报错
     pub fn get_workspace(&self) -> Result<&str, anyhow::Error> {
-        self.workspace.as_deref()
-            .ok_or_else(|| anyhow::anyhow!("Missing required workspace configuration for node: {}", self.name))
+        self.workspace.as_deref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "Missing required workspace configuration for node: {}",
+                self.name
+            )
+        })
     }
 
     /// 获取节点的存储路径：
@@ -181,8 +188,16 @@ impl ClusterConfig {
             task_spec: TaskSpec {
                 version: "1.0".to_string(),
                 monitoring: MonitoringConfig {
-                    grafana: GrafanaConfig { port: 3000, admin_user: None, admin_password: None },
-                    greptimedb: GreptimeDbConfig { port: 4000, mysql_user: None, mysql_password: None },
+                    grafana: GrafanaConfig {
+                        port: 3000,
+                        admin_user: None,
+                        admin_password: None,
+                    },
+                    greptimedb: GreptimeDbConfig {
+                        port: 4000,
+                        mysql_user: None,
+                        mysql_password: None,
+                    },
                     enabled: true,
                     httpserver: HttpServerConfig { port: 8088 },
                 },
@@ -210,7 +225,9 @@ impl ClusterConfig {
             .nodes
             .iter()
             .find(|n| matches!(n.role, NodeRole::Head))
-            .ok_or_else(|| anyhow::anyhow!("Head node not found in cluster '{}'", self.cluster_name))?;
+            .ok_or_else(|| {
+                anyhow::anyhow!("Head node not found in cluster '{}'", self.cluster_name)
+            })?;
         Ok(head.get_ip()?.to_string())
     }
 

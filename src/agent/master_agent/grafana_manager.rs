@@ -1,7 +1,7 @@
+use crate::remote_ctl::SSHManager;
 use anyhow::Result;
 use std::process::Command;
 use tracing::info;
-use crate::remote_ctl::SSHManager;
 
 pub struct GrafanaManager {
     port: u16,
@@ -20,7 +20,12 @@ impl GrafanaManager {
         }
     }
 
-    pub fn with_ssh(port: u16, greptimedb_endpoint: String, workspace: String, ssh_manager: SSHManager) -> Self {
+    pub fn with_ssh(
+        port: u16,
+        greptimedb_endpoint: String,
+        workspace: String,
+        ssh_manager: SSHManager,
+    ) -> Self {
         Self {
             port,
             greptimedb_endpoint,
@@ -31,25 +36,26 @@ impl GrafanaManager {
 
     pub async fn setup_grafana(&self, cluster_name: &str) -> Result<()> {
         info!("Setting up Grafana for cluster: {}", cluster_name);
-        
+
         // Create Grafana configuration
         self.create_grafana_config().await?;
-        
+
         // Start Grafana container
         self.start_grafana_container().await?;
-        
+
         // Configure data source
         self.configure_data_source().await?;
-        
+
         // Import default dashboards
         self.import_dashboards().await?;
-        
+
         info!("Grafana setup completed on port: {}", self.port);
         Ok(())
     }
 
     async fn create_grafana_config(&self) -> Result<()> {
-        let config = format!(r#"[server]
+        let config = format!(
+            r#"[server]
 http_port = 3000
 
 [security]
@@ -70,7 +76,9 @@ type = prometheus
 url = {}
 access = proxy
 isDefault = true
-"#, self.greptimedb_endpoint);
+"#,
+            self.greptimedb_endpoint
+        );
 
         let grafana_config_path = format!("{}/config/grafana.ini", self.workspace);
 
@@ -80,11 +88,15 @@ isDefault = true
                 // 先创建配置目录
                 let create_dir_cmd = format!("mkdir -p {}/config", self.workspace);
                 ssh.execute_command(&create_dir_cmd, true, false).await?;
-                
+
                 // 创建配置内容到远程文件
-                let create_config_cmd = format!("cat > {} << 'EOF'\n{}\nEOF", grafana_config_path, config);
+                let create_config_cmd =
+                    format!("cat > {} << 'EOF'\n{}\nEOF", grafana_config_path, config);
                 ssh.execute_command(&create_config_cmd, true, false).await?;
-                info!("Grafana config created on remote host at: {}", grafana_config_path);
+                info!(
+                    "Grafana config created on remote host at: {}",
+                    grafana_config_path
+                );
             }
             None => {
                 // 本地创建配置目录
@@ -105,8 +117,12 @@ isDefault = true
                 if let Ok(result) = ssh.execute_command(check_cmd, true, false).await {
                     if !result.trim().is_empty() {
                         // 容器存在，先停止再删除
-                        let _ = ssh.execute_command("docker stop nokube-grafana", true, false).await;
-                        let _ = ssh.execute_command("docker rm nokube-grafana", true, false).await;
+                        let _ = ssh
+                            .execute_command("docker stop nokube-grafana", true, false)
+                            .await;
+                        let _ = ssh
+                            .execute_command("docker rm nokube-grafana", true, false)
+                            .await;
                         info!("Stopped and removed existing nokube-grafana container via SSH");
                     }
                 }
@@ -117,7 +133,7 @@ isDefault = true
                 let check_output = Command::new("sudo")
                     .args(&["docker", "ps", "-aq", "--filter", "name=nokube-grafana"])
                     .output()?;
-                
+
                 if check_output.status.success() && !check_output.stdout.is_empty() {
                     // 容器存在，先停止再删除
                     let _ = Command::new("sudo")
@@ -136,7 +152,7 @@ isDefault = true
     async fn start_grafana_container(&self) -> Result<()> {
         // First, stop and remove any existing container with the same name
         self.stop_existing_container().await?;
-        
+
         let grafana_config_path = format!("{}/config/grafana.ini", self.workspace);
         let docker_cmd = format!(
             "docker run -d --name nokube-grafana -p {}:3000 -v {}:/etc/grafana/grafana.ini greptime/grafana-greptimedb:latest",
@@ -150,10 +166,15 @@ isDefault = true
                 match ssh.execute_command(&docker_cmd, true, false).await {
                     Ok(result) => {
                         let container_id = result.trim();
-                        if container_id.len() == 64 && container_id.chars().all(|c| c.is_ascii_hexdigit()) {
+                        if container_id.len() == 64
+                            && container_id.chars().all(|c| c.is_ascii_hexdigit())
+                        {
                             // 验证容器是否真正在运行
                             self.verify_container_running(ssh, container_id).await?;
-                            info!("Grafana container started via SSH with ID: {}", container_id);
+                            info!(
+                                "Grafana container started via SSH with ID: {}",
+                                container_id
+                            );
                         } else {
                             info!("Grafana container started via SSH: {}", container_id);
                         }
@@ -161,7 +182,8 @@ isDefault = true
                     Err(e) => {
                         // 检查错误消息中是否包含容器ID
                         let error_msg = e.to_string();
-                        if let Some(container_id) = self.extract_container_id_from_error(&error_msg) {
+                        if let Some(container_id) = self.extract_container_id_from_error(&error_msg)
+                        {
                             // 验证容器是否真正在运行
                             self.verify_container_running(ssh, &container_id).await?;
                             info!("Grafana container started via SSH with ID: {} (exit code was non-zero but container created)", container_id);
@@ -175,11 +197,16 @@ isDefault = true
                 // 本地执行，使用sudo
                 let output = Command::new("sudo")
                     .args(&[
-                        "docker", "run", "-d",
-                        "--name", "nokube-grafana",
-                        "-p", &format!("{}:3000", self.port),
-                        "-v", &format!("{}:/etc/grafana/grafana.ini", grafana_config_path),
-                        "greptime/grafana-greptimedb:latest"
+                        "docker",
+                        "run",
+                        "-d",
+                        "--name",
+                        "nokube-grafana",
+                        "-p",
+                        &format!("{}:3000", self.port),
+                        "-v",
+                        &format!("{}:/etc/grafana/grafana.ini", grafana_config_path),
+                        "greptime/grafana-greptimedb:latest",
                     ])
                     .output()?;
 
@@ -197,29 +224,41 @@ isDefault = true
     async fn verify_container_running(&self, ssh: &SSHManager, container_id: &str) -> Result<()> {
         // 使用 docker ps -q --filter id=<container_id> 验证容器是否运行
         let verify_cmd = format!("docker ps -q --filter id={}", &container_id[..12]); // 只使用前12位ID
-        
+
         match ssh.execute_command(&verify_cmd, true, false).await {
             Ok(result) => {
                 let running_id = result.trim();
                 if running_id.is_empty() {
                     // 容器不在运行，检查容器状态和日志
-                    info!("Container {} not running, checking status and logs...", container_id);
-                    
+                    info!(
+                        "Container {} not running, checking status and logs...",
+                        container_id
+                    );
+
                     // 检查容器状态
-                    let status_cmd = format!("docker ps -a --filter id={} --format 'table {{{{.Status}}}}'", &container_id[..12]);
+                    let status_cmd = format!(
+                        "docker ps -a --filter id={} --format 'table {{{{.Status}}}}'",
+                        &container_id[..12]
+                    );
                     if let Ok(status_result) = ssh.execute_command(&status_cmd, true, false).await {
                         info!("Container status: {}", status_result.trim());
                     }
-                    
+
                     // 获取容器日志
                     let logs_cmd = format!("docker logs {}", &container_id[..12]);
                     if let Ok(logs_result) = ssh.execute_command(&logs_cmd, true, false).await {
                         info!("Container logs: {}", logs_result.trim());
                     }
-                    
-                    anyhow::bail!("Container {} is not running. Check logs above for details.", container_id);
+
+                    anyhow::bail!(
+                        "Container {} is not running. Check logs above for details.",
+                        container_id
+                    );
                 } else {
-                    info!("Verified container {} is running (short ID: {})", container_id, running_id);
+                    info!(
+                        "Verified container {} is running (short ID: {})",
+                        container_id, running_id
+                    );
                 }
             }
             Err(e) => {
@@ -236,7 +275,7 @@ isDefault = true
             } else {
                 &error_msg[start + 8..]
             };
-            
+
             let container_id = stdout_part.trim();
             if container_id.len() == 64 && container_id.chars().all(|c| c.is_ascii_hexdigit()) {
                 Some(container_id.to_string())
@@ -249,15 +288,18 @@ isDefault = true
     }
 
     async fn configure_data_source(&self) -> Result<()> {
-        info!("Configuring GreptimeDB data sources (Prometheus + Postgres) for endpoint: {}", self.greptimedb_endpoint);
-        
+        info!(
+            "Configuring GreptimeDB data sources (Prometheus + Postgres) for endpoint: {}",
+            self.greptimedb_endpoint
+        );
+
         // Wait for Grafana to be ready
         tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
-        
+
         // Configure data source via Grafana HTTP API
         // GreptimeDB Prometheus API endpoint needs /v1/prometheus/ suffix
         let prometheus_api_url = format!("{}/v1/prometheus", self.greptimedb_endpoint);
-        
+
         let datasource_config = serde_json::json!({
             "name": "GreptimeDB",
             "type": "prometheus",
@@ -270,10 +312,10 @@ isDefault = true
                 "prometheusVersion": "2.40.0"
             }
         });
-        
+
         let client = reqwest::Client::new();
         let grafana_url = format!("http://localhost:{}/api/datasources", self.port);
-        
+
         let response = client
             .post(&grafana_url)
             .header("Content-Type", "application/json")
@@ -281,13 +323,23 @@ isDefault = true
             .json(&datasource_config)
             .send()
             .await?;
-            
+
         if response.status().is_success() {
-            info!("Successfully configured Prometheus datasource for GreptimeDB: {}/v1/prometheus", self.greptimedb_endpoint);
+            info!(
+                "Successfully configured Prometheus datasource for GreptimeDB: {}/v1/prometheus",
+                self.greptimedb_endpoint
+            );
         } else {
             let status = response.status();
-            let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
-            anyhow::bail!("Failed to configure data source: {} - {}", status, error_text);
+            let error_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
+            anyhow::bail!(
+                "Failed to configure data source: {} - {}",
+                status,
+                error_text
+            );
         }
 
         // 不再配置 GreptimeSQL（Postgres）数据源；统一使用 Greptime HTTP 插件 greptimeplugin
@@ -318,10 +370,16 @@ isDefault = true
             info!("Successfully configured GreptimeDB plugin datasource: greptimeplugin");
         } else {
             let status = plugin_resp.status();
-            let error_text = plugin_resp.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+            let error_text = plugin_resp
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
             if status.as_u16() == 409 || error_text.to_lowercase().contains("already exists") {
                 // Try to update existing datasource to ensure URL set
-                let get_url = format!("http://localhost:{}/api/datasources/name/greptimeplugin", self.port);
+                let get_url = format!(
+                    "http://localhost:{}/api/datasources/name/greptimeplugin",
+                    self.port
+                );
                 if let Ok(get_resp) = client
                     .get(&get_url)
                     .basic_auth("admin", Some("admin"))
@@ -331,7 +389,10 @@ isDefault = true
                     if get_resp.status().is_success() {
                         if let Ok(val) = get_resp.json::<serde_json::Value>().await {
                             if let Some(id) = val.get("id").and_then(|v| v.as_i64()) {
-                                let put_url = format!("http://localhost:{}/api/datasources/{}", self.port, id);
+                                let put_url = format!(
+                                    "http://localhost:{}/api/datasources/{}",
+                                    self.port, id
+                                );
                                 let _ = client
                                     .put(&put_url)
                                     .header("Content-Type", "application/json")
@@ -345,40 +406,44 @@ isDefault = true
                     }
                 }
             } else {
-                anyhow::bail!("Failed to configure Greptime plugin datasource: {} - {}", status, error_text);
+                anyhow::bail!(
+                    "Failed to configure Greptime plugin datasource: {} - {}",
+                    status,
+                    error_text
+                );
             }
         }
-        
+
         Ok(())
     }
 
     async fn import_dashboards(&self) -> Result<()> {
         info!("Importing default nokube dashboards");
-        
+
         // Wait for Grafana API to be available
         self.wait_for_grafana_api().await?;
-        
+
         // Import cluster monitoring dashboard
         self.import_cluster_dashboard().await?;
-        
+
         // Wait between imports to avoid rate limiting
         tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-        
+
         // Import service dashboard for k8s elements
         self.import_service_dashboard().await?;
-        
+
         // Wait between imports
         tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-        
+
         // Import actor monitoring dashboard
         self.import_actor_dashboard().await?;
-        
+
         // Wait between imports
         tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-        
+
         // Import logs dashboard for viewing GreptimeDB logs
         self.import_logs_dashboard().await?;
-        
+
         info!("All NoKube dashboards imported successfully");
         Ok(())
     }
@@ -387,7 +452,7 @@ isDefault = true
         info!("Waiting for Grafana API to be available...");
         let client = reqwest::Client::new();
         let health_url = format!("http://localhost:{}/api/health", self.port);
-        
+
         for attempt in 1..=10 {
             match client.get(&health_url).send().await {
                 Ok(response) if response.status().is_success() => {
@@ -397,16 +462,23 @@ isDefault = true
                     return Ok(());
                 }
                 Ok(response) => {
-                    info!("Grafana API not ready yet (attempt {}/10): status {}", attempt, response.status());
+                    info!(
+                        "Grafana API not ready yet (attempt {}/10): status {}",
+                        attempt,
+                        response.status()
+                    );
                 }
                 Err(e) => {
-                    info!("Grafana API connection failed (attempt {}/10): {}", attempt, e);
+                    info!(
+                        "Grafana API connection failed (attempt {}/10): {}",
+                        attempt, e
+                    );
                 }
             }
-            
+
             tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
         }
-        
+
         anyhow::bail!("Grafana API did not become available after 10 attempts")
     }
 
@@ -430,7 +502,10 @@ isDefault = true
                     .basic_auth("admin", Some("admin"))
                     .send()
                     .await;
-                info!("Deleted existing cluster dashboard (UID={}) before re-import", uid);
+                info!(
+                    "Deleted existing cluster dashboard (UID={}) before re-import",
+                    uid
+                );
             }
         }
         let links_md = format!(
@@ -620,10 +695,10 @@ isDefault = true
             },
             "overwrite": true
         });
-        
+
         let client = reqwest::Client::new();
         let grafana_url = format!("http://localhost:{}/api/dashboards/db", self.port);
-        
+
         let response = client
             .post(&grafana_url)
             .header("Content-Type", "application/json")
@@ -631,13 +706,20 @@ isDefault = true
             .json(&dashboard_config)
             .send()
             .await?;
-            
+
         if response.status().is_success() {
             info!("Successfully imported NoKube cluster monitoring dashboard");
         } else {
             let status = response.status();
-            let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
-            anyhow::bail!("Failed to import cluster dashboard: {} - {}", status, error_text);
+            let error_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
+            anyhow::bail!(
+                "Failed to import cluster dashboard: {} - {}",
+                status,
+                error_text
+            );
         }
         // Set home dashboard to cluster
         if let Err(e) = self.set_home_dashboard("nokube-cluster-monitoring").await {
@@ -674,8 +756,15 @@ isDefault = true
             .await?;
         if dash.status().is_success() {
             if let Ok(val) = dash.json::<serde_json::Value>().await {
-                if let Some(id) = val.get("dashboard").and_then(|d| d.get("id")).and_then(|v| v.as_i64()) {
-                    let star_url = format!("http://localhost:{}/api/user/stars/dashboard/{}", self.port, id);
+                if let Some(id) = val
+                    .get("dashboard")
+                    .and_then(|d| d.get("id"))
+                    .and_then(|v| v.as_i64())
+                {
+                    let star_url = format!(
+                        "http://localhost:{}/api/user/stars/dashboard/{}",
+                        self.port, id
+                    );
                     let _ = client
                         .post(&star_url)
                         .basic_auth("admin", Some("admin"))
@@ -689,7 +778,7 @@ isDefault = true
 
     async fn import_service_dashboard(&self) -> Result<()> {
         info!("Importing NoKube service dashboard for k8s elements");
-        
+
         // Create service dashboard with filters for namespace, daemonset, deployment, pod, container
         let service_dashboard_config = serde_json::json!({
             "dashboard": {
@@ -900,10 +989,10 @@ isDefault = true
             },
             "overwrite": true
         });
-        
+
         let client = reqwest::Client::new();
         let grafana_url = format!("http://localhost:{}/api/dashboards/db", self.port);
-        
+
         let response = client
             .post(&grafana_url)
             .header("Content-Type", "application/json")
@@ -911,15 +1000,22 @@ isDefault = true
             .json(&service_dashboard_config)
             .send()
             .await?;
-            
+
         if response.status().is_success() {
             info!("Successfully imported NoKube service dashboard for k8s elements");
         } else {
             let status = response.status();
-            let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
-            anyhow::bail!("Failed to import service dashboard: {} - {}", status, error_text);
+            let error_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
+            anyhow::bail!(
+                "Failed to import service dashboard: {} - {}",
+                status,
+                error_text
+            );
         }
-        
+
         Ok(())
     }
 
@@ -1082,10 +1178,10 @@ isDefault = true
             },
             "overwrite": true
         });
-        
+
         let client = reqwest::Client::new();
         let grafana_url = format!("http://localhost:{}/api/dashboards/db", self.port);
-        
+
         let response = client
             .post(&grafana_url)
             .header("Content-Type", "application/json")
@@ -1093,21 +1189,28 @@ isDefault = true
             .json(&actor_dashboard_config)
             .send()
             .await?;
-            
+
         if response.status().is_success() {
             info!("Successfully imported NoKube actor monitoring dashboard");
         } else {
             let status = response.status();
-            let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
-            anyhow::bail!("Failed to import actor dashboard: {} - {}", status, error_text);
+            let error_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
+            anyhow::bail!(
+                "Failed to import actor dashboard: {} - {}",
+                status,
+                error_text
+            );
         }
-        
+
         Ok(())
     }
 
     async fn import_logs_dashboard(&self) -> Result<()> {
         info!("Importing NoKube logs dashboard for OTLP GreptimeDB logs");
-        
+
         // Create a simplified logs dashboard for OTLP format
         let logs_dashboard_config = serde_json::json!({
             "dashboard": {
@@ -1134,7 +1237,7 @@ isDefault = true
                         },
                         {
                             "name": "source",
-                            "type": "query", 
+                            "type": "query",
                             "label": "Source",
                             "datasource": "GreptimeSQL",
                             "query": "SELECT DISTINCT log_attributes->>'source' as value FROM opentelemetry_logs WHERE log_attributes->>'cluster_name' IN (${cluster:csv}) AND log_attributes ? 'source'",
@@ -1208,7 +1311,7 @@ isDefault = true
                     },
                     {
                         "id": 3,
-                        "title": "Recent Logs Timeline", 
+                        "title": "Recent Logs Timeline",
                         "type": "timeseries",
                         "datasource": "greptimeplugin",
                         "targets": [
@@ -1264,10 +1367,10 @@ isDefault = true
             },
             "overwrite": true
         });
-        
+
         let client = reqwest::Client::new();
         let grafana_url = format!("http://localhost:{}/api/dashboards/db", self.port);
-        
+
         let response = client
             .post(&grafana_url)
             .header("Content-Type", "application/json")
@@ -1275,26 +1378,38 @@ isDefault = true
             .json(&logs_dashboard_config)
             .send()
             .await?;
-            
+
         if response.status().is_success() {
             info!("Successfully imported NoKube logs dashboard for GreptimeDB logs");
         } else {
             let status = response.status();
-            let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
-            anyhow::bail!("Failed to import logs dashboard: {} - {}", status, error_text);
+            let error_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
+            anyhow::bail!(
+                "Failed to import logs dashboard: {} - {}",
+                status,
+                error_text
+            );
         }
-        
+
         Ok(())
     }
 
     pub async fn stop_grafana(&self) -> Result<()> {
         info!("Stopping Grafana");
-        
+
         match &self.ssh_manager {
             Some(ssh) => {
                 // 使用SSH执行命令，启用require_root模式
-                let _result = ssh.execute_command("docker stop nokube-grafana", true, false).await?;
-                let _result = ssh.execute_command("docker rm nokube-grafana", true, false).await.ok();
+                let _result = ssh
+                    .execute_command("docker stop nokube-grafana", true, false)
+                    .await?;
+                let _result = ssh
+                    .execute_command("docker rm nokube-grafana", true, false)
+                    .await
+                    .ok();
                 info!("Grafana container stopped via SSH");
             }
             None => {
@@ -1311,7 +1426,7 @@ isDefault = true
                 let _ = Command::new("sudo")
                     .args(&["docker", "rm", "nokube-grafana"])
                     .output();
-                    
+
                 info!("Grafana container stopped locally with sudo");
             }
         }

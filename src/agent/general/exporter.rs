@@ -1,13 +1,13 @@
-use serde::{Deserialize, Serialize};
-use tokio::time::Duration;
+use super::docker_runner::DockerRunner;
+use crate::config::{cluster_config::ClusterConfig, etcd_manager::EtcdManager};
 use anyhow::Result;
 use reqwest::Client;
-use crate::config::{etcd_manager::EtcdManager, cluster_config::ClusterConfig};
-use super::docker_runner::DockerRunner;
+use serde::{Deserialize, Serialize};
+use std::process::Command as StdCommand;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use tokio::time::Duration;
 use tracing::info;
-use std::process::Command as StdCommand;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemMetrics {
@@ -44,7 +44,7 @@ impl Exporter {
     pub async fn start_with_etcd_polling(&self) -> Result<()> {
         let config_poller = self.start_config_polling().await?;
         let metrics_collector = self.start_metrics_collection().await?;
-        
+
         tokio::try_join!(config_poller, metrics_collector)?;
         Ok(())
     }
@@ -53,17 +53,17 @@ impl Exporter {
         let etcd_manager = Arc::clone(&self.etcd_manager);
         let cluster_name = self.cluster_name.clone();
         let current_config = Arc::clone(&self.current_config);
-        
+
         let handle = tokio::spawn(async move {
             loop {
                 match etcd_manager.get_cluster_config(&cluster_name).await {
                     Ok(Some(config)) => {
                         let mut config_guard = current_config.write().await;
                         *config_guard = Some(config.clone());
-                        
+
                         let poll_interval = config.nokube_config.config_poll_interval.unwrap_or(10);
                         drop(config_guard);
-                        
+
                         tokio::time::sleep(Duration::from_secs(poll_interval)).await;
                     }
                     Ok(None) => {
@@ -77,7 +77,7 @@ impl Exporter {
                 }
             }
         });
-        
+
         Ok(handle)
     }
 
@@ -85,7 +85,7 @@ impl Exporter {
         let current_config = Arc::clone(&self.current_config);
         let client = self.client.clone();
         let node_id = self.node_id.clone();
-        
+
         let handle = tokio::spawn(async move {
             loop {
                 let config_guard = current_config.read().await;
@@ -93,27 +93,50 @@ impl Exporter {
                     if config.task_spec.monitoring.enabled {
                         let interval_seconds = config.nokube_config.metrics_interval.unwrap_or(30);
                         // 直接使用节点列表中的地址进行推送，而不需要额外的配置
-                        
+
                         // 查找启用了greptimedb的节点作为推送目标
-                        if let Some(head_node) = config.nodes.iter().find(|n| matches!(n.role, crate::config::cluster_config::NodeRole::Head)) {
-                            let greptimedb_url = format!("http://{}:{}", 
-                                head_node.get_ip().map_err(|e| anyhow::anyhow!("Failed to get node IP: {}", e))?,
+                        if let Some(head_node) = config.nodes.iter().find(|n| {
+                            matches!(n.role, crate::config::cluster_config::NodeRole::Head)
+                        }) {
+                            let greptimedb_url = format!(
+                                "http://{}:{}",
+                                head_node
+                                    .get_ip()
+                                    .map_err(|e| anyhow::anyhow!("Failed to get node IP: {}", e))?,
                                 config.task_spec.monitoring.greptimedb.port
                             );
-                            
+
                             match Self::collect_system_metrics(&node_id).await {
                                 Ok(metrics) => {
                                     info!("📊 Metrics collected for node '{}': CPU: {:.1}%, Memory: {:.1}%, RX: {} bytes, TX: {} bytes", 
                                           node_id, metrics.cpu_usage, metrics.memory_usage, metrics.network_rx_bytes, metrics.network_tx_bytes);
-                                    
+
                                     // 收集 actor（容器）级别指标
                                     let containers = Self::list_actor_containers();
-                                    let container_metrics = containers.into_iter()
-                                        .filter_map(|name| Self::collect_container_metrics(&name).ok().map(|m| (name, m)))
+                                    let container_metrics = containers
+                                        .into_iter()
+                                        .filter_map(|name| {
+                                            Self::collect_container_metrics(&name)
+                                                .ok()
+                                                .map(|m| (name, m))
+                                        })
                                         .collect::<Vec<_>>();
 
-                                    if let Err(e) = Self::push_to_greptimedb_all(&client, &greptimedb_url, &metrics, &node_id, &container_metrics, &config.cluster_name).await {
-                                        tracing::error!("Failed to push metrics to GreptimeDB URL {}: {}", greptimedb_url, e);
+                                    if let Err(e) = Self::push_to_greptimedb_all(
+                                        &client,
+                                        &greptimedb_url,
+                                        &metrics,
+                                        &node_id,
+                                        &container_metrics,
+                                        &config.cluster_name,
+                                    )
+                                    .await
+                                    {
+                                        tracing::error!(
+                                            "Failed to push metrics to GreptimeDB URL {}: {}",
+                                            greptimedb_url,
+                                            e
+                                        );
                                     } else {
                                         info!("✅ Successfully pushed metrics to GreptimeDB for node '{}'", node_id);
                                     }
@@ -122,7 +145,7 @@ impl Exporter {
                                     tracing::error!("Failed to collect metrics: {}", e);
                                 }
                             }
-                            
+
                             tokio::time::sleep(Duration::from_secs(interval_seconds)).await;
                         } else {
                             tracing::warn!("No head node found for metrics collection");
@@ -138,7 +161,7 @@ impl Exporter {
                 }
             }
         });
-        
+
         Ok(handle)
     }
 
@@ -155,7 +178,9 @@ impl Exporter {
                 .map(|s| s.trim())
                 .filter(|n| !n.is_empty())
                 // 支持 actor 容器（nokube-pod-*）以及平台内置服务容器（nokube-*, 如 grafana/greptimedb/httpserver），以及含 gitops 的容器
-                .filter(|n| n.starts_with("nokube-pod-") || n.starts_with("nokube-") || n.contains("gitops"))
+                .filter(|n| {
+                    n.starts_with("nokube-pod-") || n.starts_with("nokube-") || n.contains("gitops")
+                })
                 .map(|s| s.to_string())
                 .collect();
         }
@@ -166,42 +191,83 @@ impl Exporter {
     fn collect_container_metrics(container: &str) -> Result<(f64, u64, f64)> {
         let docker_path = DockerRunner::get_runtime_path().unwrap_or_else(|_| "docker".to_string());
         let out = StdCommand::new(docker_path)
-            .args(["stats", "--no-stream", "--format", "{{.CPUPerc}}\t{{.MemUsage}}\t{{.MemPerc}}", container])
+            .args([
+                "stats",
+                "--no-stream",
+                "--format",
+                "{{.CPUPerc}}\t{{.MemUsage}}\t{{.MemPerc}}",
+                container,
+            ])
             .output()?;
         if !out.status.success() {
             anyhow::bail!("docker stats failed for {}", container);
         }
         let line = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        if line.is_empty() { anyhow::bail!("empty stats for {}", container); }
+        if line.is_empty() {
+            anyhow::bail!("empty stats for {}", container);
+        }
         let parts: Vec<&str> = line.split('\t').collect();
-        if parts.len() < 3 { anyhow::bail!("unexpected stats format: {}", line); }
-        let cpu = parts[0].trim().trim_end_matches('%').replace(',', ".").parse::<f64>().unwrap_or(0.0);
-        let mem_usage_str = parts[1].trim().split('/').next().unwrap_or(parts[1].trim()).trim();
+        if parts.len() < 3 {
+            anyhow::bail!("unexpected stats format: {}", line);
+        }
+        let cpu = parts[0]
+            .trim()
+            .trim_end_matches('%')
+            .replace(',', ".")
+            .parse::<f64>()
+            .unwrap_or(0.0);
+        let mem_usage_str = parts[1]
+            .trim()
+            .split('/')
+            .next()
+            .unwrap_or(parts[1].trim())
+            .trim();
         let mem_bytes = Self::parse_size_to_bytes(mem_usage_str);
-        let mem_pct = parts[2].trim().trim_end_matches('%').replace(',', ".").parse::<f64>().unwrap_or(0.0);
+        let mem_pct = parts[2]
+            .trim()
+            .trim_end_matches('%')
+            .replace(',', ".")
+            .parse::<f64>()
+            .unwrap_or(0.0);
         Ok((cpu, mem_bytes, mem_pct))
     }
 
     /// 从容器名推断 pod 名、顶层 actor 名和所有者类型（deployment/daemonset）
-    pub fn derive_actor_core(container: &str, node: &str, cluster: &str) -> (String, String, String) {
+    pub fn derive_actor_core(
+        container: &str,
+        node: &str,
+        cluster: &str,
+    ) -> (String, String, String) {
         // 容器名约定: nokube-pod-<pod_name>
-        let pod = container.strip_prefix("nokube-pod-").unwrap_or(container).to_string();
+        let pod = container
+            .strip_prefix("nokube-pod-")
+            .unwrap_or(container)
+            .to_string();
         let mut core = pod.clone();
         // DaemonSet: <daemonset>-<node>
         let ds_suffix = format!("-{}", node);
         if core.ends_with(&ds_suffix) {
-            core = core.trim_end_matches(&ds_suffix).trim_end_matches('-').to_string();
+            core = core
+                .trim_end_matches(&ds_suffix)
+                .trim_end_matches('-')
+                .to_string();
             // 若末尾还带 -<cluster>，一起去掉，得到 core 名
             let cluster_suffix = format!("-{}", cluster);
             if core.ends_with(&cluster_suffix) {
-                core = core.trim_end_matches(&cluster_suffix).trim_end_matches('-').to_string();
+                core = core
+                    .trim_end_matches(&cluster_suffix)
+                    .trim_end_matches('-')
+                    .to_string();
             }
             return (pod, core, "daemonset".to_string());
         }
         // 统一去掉 -<cluster>
         let cluster_suffix = format!("-{}", cluster);
         if core.ends_with(&cluster_suffix) {
-            core = core.trim_end_matches(&cluster_suffix).trim_end_matches('-').to_string();
+            core = core
+                .trim_end_matches(&cluster_suffix)
+                .trim_end_matches('-')
+                .to_string();
         }
         // Deployment: 若末段为8hex，则去掉
         if let Some((b, last)) = core.rsplit_once('-') {
@@ -239,9 +305,10 @@ impl Exporter {
     async fn collect_system_metrics(node_id: &str) -> Result<SystemMetrics> {
         let cpu_usage = Self::get_cpu_usage().await?;
         let cpu_cores = Self::get_cpu_cores().await?;
-        let (memory_usage, memory_used_bytes, memory_total_bytes) = Self::get_memory_stats().await?;
+        let (memory_usage, memory_used_bytes, memory_total_bytes) =
+            Self::get_memory_stats().await?;
         let (network_rx_bytes, network_tx_bytes) = Self::get_network_stats().await?;
-        
+
         Ok(SystemMetrics {
             timestamp: chrono::Utc::now().timestamp() as u64,
             cpu_usage,
@@ -259,14 +326,15 @@ impl Exporter {
         // 读取 /proc/stat 获取CPU使用率
         let stat_content = tokio::fs::read_to_string("/proc/stat").await?;
         let line = stat_content.lines().next().unwrap_or("");
-        
+
         // 解析第一行: cpu user nice system idle iowait irq softirq steal guest guest_nice
-        let values: Vec<u64> = line.split_whitespace()
+        let values: Vec<u64> = line
+            .split_whitespace()
             .skip(1) // 跳过 "cpu" 标签
             .take(10)
             .filter_map(|s| s.parse().ok())
             .collect();
-            
+
         if values.len() >= 4 {
             let idle = values[3];
             let total: u64 = values.iter().sum();
@@ -275,7 +343,7 @@ impl Exporter {
                 return Ok(cpu_usage.max(0.0).min(100.0));
             }
         }
-        
+
         // 如果解析失败，返回默认值
         Ok(0.0)
     }
@@ -283,10 +351,10 @@ impl Exporter {
     async fn get_memory_stats() -> Result<(f64, u64, u64)> {
         // 读取 /proc/meminfo 获取内存使用率
         let meminfo_content = tokio::fs::read_to_string("/proc/meminfo").await?;
-        
+
         let mut mem_total = 0u64;
         let mut mem_available = 0u64;
-        
+
         for line in meminfo_content.lines() {
             if line.starts_with("MemTotal:") {
                 if let Some(value) = line.split_whitespace().nth(1) {
@@ -298,26 +366,31 @@ impl Exporter {
                 }
             }
         }
-        
+
         if mem_total > 0 {
             let mem_used_kb = mem_total.saturating_sub(mem_available);
             let memory_usage = (mem_used_kb as f64 / mem_total as f64) * 100.0;
             let mem_used_bytes = mem_used_kb.saturating_mul(1024);
             let mem_total_bytes = mem_total.saturating_mul(1024);
-            return Ok((memory_usage.max(0.0).min(100.0), mem_used_bytes, mem_total_bytes));
+            return Ok((
+                memory_usage.max(0.0).min(100.0),
+                mem_used_bytes,
+                mem_total_bytes,
+            ));
         }
-        
+
         Ok((0.0, 0, 0))
     }
 
     async fn get_network_stats() -> Result<(u64, u64)> {
         // 读取 /proc/net/dev 获取网络统计信息
         let netdev_content = tokio::fs::read_to_string("/proc/net/dev").await?;
-        
+
         let mut total_rx_bytes = 0u64;
         let mut total_tx_bytes = 0u64;
-        
-        for line in netdev_content.lines().skip(2) { // 跳过头部两行
+
+        for line in netdev_content.lines().skip(2) {
+            // 跳过头部两行
             let parts: Vec<&str> = line.split_whitespace().collect();
             if parts.len() >= 10 {
                 let interface = parts[0].trim_end_matches(':');
@@ -330,13 +403,15 @@ impl Exporter {
                 }
             }
         }
-        
+
         Ok((total_rx_bytes, total_tx_bytes))
     }
 
     async fn get_cpu_cores() -> Result<u64> {
         // Prefer /proc/cpuinfo logical processor count
-        let content = tokio::fs::read_to_string("/proc/cpuinfo").await.unwrap_or_default();
+        let content = tokio::fs::read_to_string("/proc/cpuinfo")
+            .await
+            .unwrap_or_default();
         let mut count = 0u64;
         for line in content.lines() {
             // Each logical processor in linux shows a 'processor\t: N' entry
@@ -346,7 +421,8 @@ impl Exporter {
         }
         if count == 0 {
             // Fallback: try /sys/devices/system/cpu/present like 0-3 -> 4 cores
-            if let Ok(present) = tokio::fs::read_to_string("/sys/devices/system/cpu/present").await {
+            if let Ok(present) = tokio::fs::read_to_string("/sys/devices/system/cpu/present").await
+            {
                 let s = present.trim();
                 if let Some((start, end)) = s.split_once('-') {
                     if let (Ok(a), Ok(b)) = (start.parse::<u64>(), end.parse::<u64>()) {
@@ -355,7 +431,9 @@ impl Exporter {
                 }
             }
         }
-        if count == 0 { count = 1; } // sensible fallback
+        if count == 0 {
+            count = 1;
+        } // sensible fallback
         Ok(count)
     }
 
@@ -381,16 +459,40 @@ impl Exporter {
             node_tag,
             node_tag
         );
-        influxdb_metrics.push_str(&format!("nokube_cpu_usage{} value={} {}\n", sys_tags, metrics.cpu_usage, ts));
-        influxdb_metrics.push_str(&format!("nokube_cpu_cores{} value={} {}\n", sys_tags, metrics.cpu_cores, ts));
-        influxdb_metrics.push_str(&format!("nokube_memory_usage{} value={} {}\n", sys_tags, metrics.memory_usage, ts));
-        influxdb_metrics.push_str(&format!("nokube_memory_used_bytes{} value={} {}\n", sys_tags, metrics.memory_used_bytes, ts));
-        influxdb_metrics.push_str(&format!("nokube_memory_total_bytes{} value={} {}\n", sys_tags, metrics.memory_total_bytes, ts));
-        influxdb_metrics.push_str(&format!("nokube_network_rx_bytes{} value={} {}\n", sys_tags, metrics.network_rx_bytes, ts));
-        influxdb_metrics.push_str(&format!("nokube_network_tx_bytes{} value={} {}\n", sys_tags, metrics.network_tx_bytes, ts));
+        influxdb_metrics.push_str(&format!(
+            "nokube_cpu_usage{} value={} {}\n",
+            sys_tags, metrics.cpu_usage, ts
+        ));
+        influxdb_metrics.push_str(&format!(
+            "nokube_cpu_cores{} value={} {}\n",
+            sys_tags, metrics.cpu_cores, ts
+        ));
+        influxdb_metrics.push_str(&format!(
+            "nokube_memory_usage{} value={} {}\n",
+            sys_tags, metrics.memory_usage, ts
+        ));
+        influxdb_metrics.push_str(&format!(
+            "nokube_memory_used_bytes{} value={} {}\n",
+            sys_tags, metrics.memory_used_bytes, ts
+        ));
+        influxdb_metrics.push_str(&format!(
+            "nokube_memory_total_bytes{} value={} {}\n",
+            sys_tags, metrics.memory_total_bytes, ts
+        ));
+        influxdb_metrics.push_str(&format!(
+            "nokube_network_rx_bytes{} value={} {}\n",
+            sys_tags, metrics.network_rx_bytes, ts
+        ));
+        influxdb_metrics.push_str(&format!(
+            "nokube_network_tx_bytes{} value={} {}\n",
+            sys_tags, metrics.network_tx_bytes, ts
+        ));
 
         // 计算节点内存派生量（与容器同步采样时间戳对齐）
-        let sum_container_mem_bytes: u64 = container_metrics.iter().map(|(_, (_cpu, mem_bytes, _pct))| *mem_bytes).sum();
+        let sum_container_mem_bytes: u64 = container_metrics
+            .iter()
+            .map(|(_, (_cpu, mem_bytes, _pct))| *mem_bytes)
+            .sum();
         let other_used_bytes = metrics
             .memory_used_bytes
             .saturating_sub(sum_container_mem_bytes);
@@ -410,7 +512,8 @@ impl Exporter {
         // 追加容器级别指标
         for (name, (cpu_pct, mem_bytes, mem_pct)) in container_metrics {
             let container_tag = Self::esc_tag(name);
-            let (pod, core_actor, owner_type) = Self::derive_actor_core(name, instance, cluster_name);
+            let (pod, core_actor, owner_type) =
+                Self::derive_actor_core(name, instance, cluster_name);
             // 规范化顶层名：始终为 <core>-<cluster>
             let canonical_upper = format!("{}-{}", core_actor, cluster_name);
             let pod_tag = Self::esc_tag(&pod);
@@ -439,18 +542,30 @@ impl Exporter {
                 owner_tag,
                 container_path_tag
             );
-            influxdb_metrics.push_str(&format!("nokube_container_cpu{} value={} {}\n", tags, cpu_pct, ts));
-            influxdb_metrics.push_str(&format!("nokube_container_cpu_cores{} value={} {}\n", tags, cpu_cores_val, ts));
-            influxdb_metrics.push_str(&format!("nokube_container_mem_bytes{} value={} {}\n", tags, mem_bytes, ts));
-            influxdb_metrics.push_str(&format!("nokube_container_mem_percent{} value={} {}\n", tags, mem_pct, ts));
+            influxdb_metrics.push_str(&format!(
+                "nokube_container_cpu{} value={} {}\n",
+                tags, cpu_pct, ts
+            ));
+            influxdb_metrics.push_str(&format!(
+                "nokube_container_cpu_cores{} value={} {}\n",
+                tags, cpu_cores_val, ts
+            ));
+            influxdb_metrics.push_str(&format!(
+                "nokube_container_mem_bytes{} value={} {}\n",
+                tags, mem_bytes, ts
+            ));
+            influxdb_metrics.push_str(&format!(
+                "nokube_container_mem_percent{} value={} {}\n",
+                tags, mem_pct, ts
+            ));
         }
 
         // 使用 InfluxDB 写入端点而不是 Prometheus remote write
         let url = format!("{}/v1/influxdb/write", greptimedb_url);
-        
+
         tracing::debug!("Pushing metrics to GreptimeDB URL: {}", url);
         tracing::debug!("Request body (InfluxDB format):\n{}", influxdb_metrics);
-        
+
         let response = client
             .post(&url)
             .header("Content-Type", "text/plain")
@@ -460,18 +575,24 @@ impl Exporter {
 
         if !response.status().is_success() {
             let status = response.status();
-            let error_body = response.text().await.unwrap_or_else(|_| "Failed to read error response".to_string());
+            let error_body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Failed to read error response".to_string());
             anyhow::bail!(
-                "Failed to push metrics to GreptimeDB URL {}: {} {}\nRequest body (InfluxDB format):\n{}\nResponse body:\n{}", 
-                url, 
-                status.as_u16(), 
+                "Failed to push metrics to GreptimeDB URL {}: {} {}\nRequest body (InfluxDB format):\n{}\nResponse body:\n{}",
+                url,
+                status.as_u16(),
                 status.canonical_reason().unwrap_or("Unknown"),
                 influxdb_metrics,
                 error_body
             );
         }
 
-        tracing::debug!("Successfully pushed metrics (node+containers) to GreptimeDB for node: {}", instance);
+        tracing::debug!(
+            "Successfully pushed metrics (node+containers) to GreptimeDB for node: {}",
+            instance
+        );
         Ok(())
     }
 }

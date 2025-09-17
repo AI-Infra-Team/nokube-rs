@@ -1,11 +1,9 @@
-use crate::config::etcd_manager::EtcdManager;
 use crate::config::cluster_config::ClusterConfig;
+use crate::config::etcd_manager::EtcdManager;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
-
-
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct NokubeConfig {
@@ -59,12 +57,15 @@ impl ConfigManager {
     pub async fn new() -> Result<Self> {
         tracing::info!("Loading nokube configuration...");
         let config = Self::load_nokube_config()?;
-        
-        tracing::info!("Creating EtcdManager with endpoints: {:?}", config.etcd_endpoints);
+
+        tracing::info!(
+            "Creating EtcdManager with endpoints: {:?}",
+            config.etcd_endpoints
+        );
         let etcd_manager = EtcdManager::new(config.etcd_endpoints.clone()).await?;
-        
+
         tracing::info!("ConfigManager initialized successfully");
-        Ok(Self { 
+        Ok(Self {
             etcd_manager,
             etcd_endpoints: config.etcd_endpoints,
         })
@@ -87,11 +88,13 @@ impl ConfigManager {
             );
         };
 
-        let content = fs::read_to_string(&config_to_use)
-                .map_err(|e| anyhow::anyhow!("Failed to read config {}: {}", config_to_use.display(), e))?;
-            
-            serde_yaml::from_str(&content)
-                .map_err(|e| anyhow::anyhow!("Failed to parse config {}: {}", config_to_use.display(), e))
+        let content = fs::read_to_string(&config_to_use).map_err(|e| {
+            anyhow::anyhow!("Failed to read config {}: {}", config_to_use.display(), e)
+        })?;
+
+        serde_yaml::from_str(&content).map_err(|e| {
+            anyhow::anyhow!("Failed to parse config {}: {}", config_to_use.display(), e)
+        })
     }
 
     pub async fn init_cluster(&self, cluster_name: &str) -> Result<()> {
@@ -105,7 +108,10 @@ impl ConfigManager {
         Ok(())
     }
 
-    pub async fn get_cluster_meta(&self, cluster_name: &str) -> Result<Option<crate::config::cluster_config::ClusterMeta>> {
+    pub async fn get_cluster_meta(
+        &self,
+        cluster_name: &str,
+    ) -> Result<Option<crate::config::cluster_config::ClusterMeta>> {
         self.etcd_manager.get_cluster_meta(cluster_name).await
     }
     pub async fn list_clusters(&self) -> Result<Vec<crate::config::cluster_config::ClusterMeta>> {
@@ -117,22 +123,42 @@ impl ConfigManager {
     }
 
     // K8s对象存储方法
-    pub async fn store_deployment(&self, cluster_name: &str, name: &str, yaml_content: &str) -> Result<()> {
+    pub async fn store_deployment(
+        &self,
+        cluster_name: &str,
+        name: &str,
+        yaml_content: &str,
+    ) -> Result<()> {
         let key = format!("/nokube/{}/deployments/{}", cluster_name, name);
         self.etcd_manager.put(key, yaml_content.to_string()).await
     }
 
-    pub async fn store_daemonset(&self, cluster_name: &str, name: &str, yaml_content: &str) -> Result<()> {
+    pub async fn store_daemonset(
+        &self,
+        cluster_name: &str,
+        name: &str,
+        yaml_content: &str,
+    ) -> Result<()> {
         let key = format!("/nokube/{}/daemonsets/{}", cluster_name, name);
         self.etcd_manager.put(key, yaml_content.to_string()).await
     }
 
-    pub async fn store_configmap(&self, cluster_name: &str, name: &str, yaml_content: &str) -> Result<()> {
+    pub async fn store_configmap(
+        &self,
+        cluster_name: &str,
+        name: &str,
+        yaml_content: &str,
+    ) -> Result<()> {
         let key = format!("/nokube/{}/configmaps/{}", cluster_name, name);
         self.etcd_manager.put(key, yaml_content.to_string()).await
     }
 
-    pub async fn store_secret(&self, cluster_name: &str, name: &str, yaml_content: &str) -> Result<()> {
+    pub async fn store_secret(
+        &self,
+        cluster_name: &str,
+        name: &str,
+        yaml_content: &str,
+    ) -> Result<()> {
         let key = format!("/nokube/{}/secrets/{}", cluster_name, name);
         self.etcd_manager.put(key, yaml_content.to_string()).await
     }

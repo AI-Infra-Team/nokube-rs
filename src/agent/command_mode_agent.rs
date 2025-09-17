@@ -1340,7 +1340,10 @@ providers:
         {
             let client_pre = reqwest::Client::new();
             let uid = "nokube-cluster-monitoring";
-            let get_url = format!("http://{}:{}/api/dashboards/uid/{}", node_ip, grafana_port, uid);
+            let get_url = format!(
+                "http://{}:{}/api/dashboards/uid/{}",
+                node_ip, grafana_port, uid
+            );
             if let Ok(resp) = client_pre
                 .get(&get_url)
                 .basic_auth("admin", Some("admin"))
@@ -1348,7 +1351,10 @@ providers:
                 .await
             {
                 if resp.status().is_success() {
-                    let del_url = format!("http://{}:{}/api/dashboards/uid/{}", node_ip, grafana_port, uid);
+                    let del_url = format!(
+                        "http://{}:{}/api/dashboards/uid/{}",
+                        node_ip, grafana_port, uid
+                    );
                     let _ = client_pre
                         .delete(&del_url)
                         .basic_auth("admin", Some("admin"))

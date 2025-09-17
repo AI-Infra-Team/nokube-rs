@@ -1,14 +1,14 @@
 // k8s对象实现 - DaemonSet, Deployment, Pod等计算型对象
-use crate::k8s::{AsyncTaskObject, GlobalAttributionPath, K8sObjectType, ComponentStatus};
-use crate::k8s::the_proxy::{ActorAliveRequest};
-use crate::k8s::ActorSupervise;
 use crate::config::config_manager::ConfigManager;
+use crate::k8s::the_proxy::ActorAliveRequest;
+use crate::k8s::ActorOrphanCleanup;
+use crate::k8s::{AsyncTaskObject, ComponentStatus, GlobalAttributionPath, K8sObjectType};
 use anyhow::Result;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use tokio::sync::mpsc;
-use chrono::{DateTime, Utc};
 use std::sync::Arc;
+use tokio::sync::mpsc;
 
 /// Pod描述信息结构体
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -89,16 +89,26 @@ pub enum ContainerState {
 impl std::fmt::Display for ContainerState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ContainerState::Waiting { reason } => write!(f, "Waiting\n      Reason:       {}", reason),
+            ContainerState::Waiting { reason } => {
+                write!(f, "Waiting\n      Reason:       {}", reason)
+            }
             ContainerState::Running { started_at } => {
                 if let Some(time) = started_at {
-                    write!(f, "Running\n    Started:        {}", time.format("%a, %d %b %Y %H:%M:%S +0000"))
+                    write!(
+                        f,
+                        "Running\n    Started:        {}",
+                        time.format("%a, %d %b %Y %H:%M:%S +0000")
+                    )
                 } else {
                     write!(f, "Running")
                 }
-            },
+            }
             ContainerState::Terminated { reason, exit_code } => {
-                write!(f, "Terminated\n      Reason:       {}\n      Exit Code:    {}", reason, exit_code)
+                write!(
+                    f,
+                    "Terminated\n      Reason:       {}\n      Exit Code:    {}",
+                    reason, exit_code
+                )
             }
         }
     }
@@ -121,29 +131,31 @@ impl PodDescription {
         pod_name: &str,
     ) -> Result<Option<Self>> {
         let etcd_manager = config_manager.get_etcd_manager();
-        
+
         // 从etcd获取pod信息
         let pod_key = format!("/nokube/{}/pods/{}", cluster_name, pod_name);
         let pod_data = etcd_manager.get(pod_key).await?;
-        
+
         if let Some(kv) = pod_data.first() {
             let pod_json = kv.value_str();
             // 解析基本pod信息
             let pod_info: serde_json::Value = serde_json::from_str(pod_json)?;
-            
+
             // 获取节点信息
-            let node_name = pod_info.get("node")
+            let node_name = pod_info
+                .get("node")
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown")
                 .to_string();
-            
+
             // 获取节点IP
             let node_ip = if node_name != "unknown" {
                 let node_key = format!("/nokube/{}/nodes/{}", cluster_name, node_name);
                 let node_data = etcd_manager.get(node_key).await?;
                 if let Some(node_kv) = node_data.first() {
                     let node_info: serde_json::Value = serde_json::from_str(node_kv.value_str())?;
-                    node_info.get("ip")
+                    node_info
+                        .get("ip")
                         .and_then(|v| v.as_str())
                         .map(|s| s.to_string())
                 } else {
@@ -152,54 +164,62 @@ impl PodDescription {
             } else {
                 None
             };
-            
+
             // 构造容器状态
             let containers = vec![ContainerStatus {
                 name: pod_name.to_string(),
-                container_id: pod_info.get("container_id")
+                container_id: pod_info
+                    .get("container_id")
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string()),
-                image: pod_info.get("image")
+                image: pod_info
+                    .get("image")
                     .and_then(|v| v.as_str())
                     .unwrap_or("unknown")
                     .to_string(),
                 state: match pod_info.get("status").and_then(|v| v.as_str()) {
                     Some("Running") => ContainerState::Running {
-                        started_at: pod_info.get("started_at")
+                        started_at: pod_info
+                            .get("started_at")
                             .and_then(|v| v.as_str())
                             .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
-                            .map(|dt| dt.with_timezone(&Utc))
+                            .map(|dt| dt.with_timezone(&Utc)),
                     },
                     Some("ContainerCreating") => ContainerState::Waiting {
-                        reason: "ContainerCreating".to_string()
+                        reason: "ContainerCreating".to_string(),
                     },
                     Some("Failed") => ContainerState::Terminated {
                         reason: "Error".to_string(),
-                        exit_code: 1
+                        exit_code: 1,
                     },
                     _ => ContainerState::Waiting {
-                        reason: "Unknown".to_string()
-                    }
+                        reason: "Unknown".to_string(),
+                    },
                 },
-                ready: pod_info.get("ready")
+                ready: pod_info
+                    .get("ready")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false),
-                restart_count: pod_info.get("restart_count")
+                restart_count: pod_info
+                    .get("restart_count")
                     .and_then(|v| v.as_i64())
                     .unwrap_or(0) as i32,
-                ports: pod_info.get("ports")
+                ports: pod_info
+                    .get("ports")
                     .and_then(|v| v.as_array())
-                    .map(|arr| arr.iter()
-                        .filter_map(|v| v.as_str())
-                        .map(|s| s.to_string())
-                        .collect())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str())
+                            .map(|s| s.to_string())
+                            .collect()
+                    })
                     .unwrap_or_default(),
             }];
-            
+
             // 获取事件信息
             let events_key = format!("/nokube/{}/events/pod/{}", cluster_name, pod_name);
             let mut events = Vec::new();
-            
+
             let events_data = etcd_manager.get(events_key).await?;
             if let Some(events_kv) = events_data.first() {
                 let events_json: serde_json::Value = serde_json::from_str(events_kv.value_str())?;
@@ -208,17 +228,19 @@ impl PodDescription {
                         if let (Some(event_type), Some(reason), Some(message)) = (
                             event.get("type").and_then(|v| v.as_str()),
                             event.get("reason").and_then(|v| v.as_str()),
-                            event.get("message").and_then(|v| v.as_str())
+                            event.get("message").and_then(|v| v.as_str()),
                         ) {
                             events.push(PodEvent {
                                 event_type: event_type.to_string(),
                                 reason: reason.to_string(),
-                                age: event.get("age")
+                                age: event
+                                    .get("age")
                                     .and_then(|v| v.as_str())
                                     .unwrap_or("unknown")
                                     .to_string(),
                                 message: message.to_string(),
-                                timestamp: event.get("timestamp")
+                                timestamp: event
+                                    .get("timestamp")
                                     .and_then(|v| v.as_str())
                                     .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
                                     .map(|dt| dt.with_timezone(&Utc)),
@@ -227,7 +249,7 @@ impl PodDescription {
                     }
                 }
             }
-            
+
             // 解析状态
             let status = match pod_info.get("status").and_then(|v| v.as_str()) {
                 Some("Running") => PodStatus::Running,
@@ -237,7 +259,7 @@ impl PodDescription {
                 Some("Succeeded") => PodStatus::Succeeded,
                 _ => PodStatus::Unknown,
             };
-            
+
             // 构造labels
             let mut labels = HashMap::new();
             if let Some(labels_obj) = pod_info.get("labels").and_then(|v| v.as_object()) {
@@ -247,33 +269,47 @@ impl PodDescription {
                     }
                 }
             }
-            
-            
+
             // 检查 actor alive 状态
-            let actor_path_key = format!("/nokube/{}/actors/{}/alive", 
-                cluster_name, 
+            let actor_path_key = format!(
+                "/nokube/{}/actors/{}/alive",
+                cluster_name,
                 pod_name.replace("/", "-")
             );
-            
+
             let alive_status = match etcd_manager.get(actor_path_key).await {
                 Ok(alive_data) if !alive_data.is_empty() => {
                     if let Some(alive_kv) = alive_data.first() {
-                        let alive_json: Result<serde_json::Value, _> = serde_json::from_str(alive_kv.value_str());
+                        let alive_json: Result<serde_json::Value, _> =
+                            serde_json::from_str(alive_kv.value_str());
                         match alive_json {
                             Ok(alive_info) => {
                                 // 检查是否已标记为 Dead
-                                if let Some(status) = alive_info.get("status").and_then(|v| v.as_str()) {
+                                if let Some(status) =
+                                    alive_info.get("status").and_then(|v| v.as_str())
+                                {
                                     if status == "Dead" {
                                         AliveStatus::Dead
                                     } else {
-                                        // 检查 last_alive 时间戳
-                                        if let Some(last_alive_str) = alive_info.get("last_alive").and_then(|v| v.as_str()) {
-                                            if let Ok(last_alive) = DateTime::parse_from_rfc3339(last_alive_str) {
+                                        // 检查 last_alive 时间戳并结合租约计算新鲜度
+                                        if let Some(last_alive_str) =
+                                            alive_info.get("last_alive").and_then(|v| v.as_str())
+                                        {
+                                            if let Ok(last_alive) =
+                                                DateTime::parse_from_rfc3339(last_alive_str)
+                                            {
                                                 let now = Utc::now();
-                                                let diff = now.signed_duration_since(last_alive.with_timezone(&Utc));
-                                                
-                                                // 如果超过 60 秒没有更新，认为 Dead
-                                                if diff.num_seconds() > 60 {
+                                                let diff = now.signed_duration_since(
+                                                    last_alive.with_timezone(&Utc),
+                                                );
+                                                let lease_ttl = alive_info
+                                                    .get("lease_ttl")
+                                                    .and_then(|v| v.as_i64())
+                                                    .unwrap_or(15)
+                                                    .max(1);
+                                                let freshness_cutoff = lease_ttl.saturating_mul(2);
+
+                                                if diff.num_seconds() > freshness_cutoff {
                                                     AliveStatus::Dead
                                                 } else {
                                                     AliveStatus::Alive
@@ -289,33 +325,37 @@ impl PodDescription {
                                     AliveStatus::Unknown
                                 }
                             }
-                            Err(_) => AliveStatus::Unknown
+                            Err(_) => AliveStatus::Unknown,
                         }
                     } else {
                         AliveStatus::Unknown
                     }
                 }
-                _ => AliveStatus::Unknown // 没有 alive key 或查询失败
+                _ => AliveStatus::Unknown, // 没有 alive key 或查询失败
             };
-            
+
             Ok(Some(PodDescription {
                 name: pod_name.to_string(),
-                namespace: pod_info.get("namespace")
+                namespace: pod_info
+                    .get("namespace")
                     .and_then(|v| v.as_str())
                     .unwrap_or("default")
                     .to_string(),
-                priority: pod_info.get("priority")
+                priority: pod_info
+                    .get("priority")
                     .and_then(|v| v.as_i64())
                     .unwrap_or(0) as i32,
                 node: format!("{}/{}", node_name, node_ip.as_deref().unwrap_or("unknown")),
                 node_ip,
-                start_time: pod_info.get("start_time")
+                start_time: pod_info
+                    .get("start_time")
                     .and_then(|v| v.as_str())
                     .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
                     .map(|dt| dt.with_timezone(&Utc)),
                 labels,
                 status,
-                ip: pod_info.get("pod_ip")
+                ip: pod_info
+                    .get("pod_ip")
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string()),
                 containers,
@@ -326,68 +366,80 @@ impl PodDescription {
             Ok(None)
         }
     }
-    
+
     /// 格式化显示pod描述信息
     pub fn display(&self) -> String {
         let mut output = String::new();
-        
+
         output.push_str(&format!("Name:         {}\n", self.name));
         output.push_str(&format!("Namespace:    {}\n", self.namespace));
         output.push_str(&format!("Priority:     {}\n", self.priority));
         output.push_str(&format!("Node:         {}\n", self.node));
-        
+
         if let Some(start_time) = &self.start_time {
-            output.push_str(&format!("Start Time:   {}\n", 
-                start_time.format("%a, %d %b %Y %H:%M:%S +0000")));
+            output.push_str(&format!(
+                "Start Time:   {}\n",
+                start_time.format("%a, %d %b %Y %H:%M:%S +0000")
+            ));
         }
-        
+
         // 显示labels
         if !self.labels.is_empty() {
-            let labels_str: Vec<String> = self.labels.iter()
+            let labels_str: Vec<String> = self
+                .labels
+                .iter()
                 .map(|(k, v)| format!("{}={}", k, v))
                 .collect();
             output.push_str(&format!("Labels:       {}\n", labels_str.join(",")));
         }
-        
+
         output.push_str(&format!("Status:       {}\n", self.status));
         output.push_str(&format!("Alive:        {}\n", self.alive_status));
-        
+
         if let Some(ip) = &self.ip {
             output.push_str(&format!("IP:           {}\n", ip));
         } else {
             output.push_str("IP:           <none>\n");
         }
-        
+
         // 显示容器信息
         output.push_str("Containers:\n");
         for container in &self.containers {
             output.push_str(&format!("  {}:\n", container.name));
-            
+
             if let Some(container_id) = &container.container_id {
                 output.push_str(&format!("    Container ID:   {}\n", container_id));
             } else {
                 output.push_str("    Container ID:   <none>\n");
             }
-            
+
             output.push_str(&format!("    Image:          {}\n", container.image));
             output.push_str(&format!("    State:          {}\n", container.state));
             output.push_str(&format!("    Ready:          {}\n", container.ready));
-            output.push_str(&format!("    Restart Count:  {}\n", container.restart_count));
-            
+            output.push_str(&format!(
+                "    Restart Count:  {}\n",
+                container.restart_count
+            ));
+
             if !container.ports.is_empty() {
-                output.push_str(&format!("    Ports:          {}\n", container.ports.join(",")));
+                output.push_str(&format!(
+                    "    Ports:          {}\n",
+                    container.ports.join(",")
+                ));
             }
         }
-        
+
         // 显示事件
         if !self.events.is_empty() {
             output.push_str("Events:\n");
             for event in &self.events {
-                output.push_str(&format!("  {}  {}           {}   {}\n", 
-                    event.event_type, event.reason, event.age, event.message));
+                output.push_str(&format!(
+                    "  {}  {}           {}   {}\n",
+                    event.event_type, event.reason, event.age, event.message
+                ));
             }
         }
-        
+
         output
     }
 }
@@ -445,7 +497,7 @@ pub struct DaemonSetObject {
     pub container_spec: ContainerSpec,
     pub workspace: String,
     pub cluster_name: String, // 添加集群名称
-    
+
     // 运行时状态
     pub pods: HashMap<String, PodObject>, // node_name -> pod
     // the_proxy连接
@@ -480,24 +532,28 @@ impl DaemonSetObject {
             config_manager,
         }
     }
-    
+
     /// 获取匹配nodeaffinity的节点列表
     async fn get_matching_nodes(&self) -> Result<Vec<String>> {
         // 这里应该实现节点选择逻辑
         // 暂时返回模拟数据
-        Ok(vec!["node1".to_string(), "node2".to_string(), "node3".to_string()])
+        Ok(vec![
+            "node1".to_string(),
+            "node2".to_string(),
+            "node3".to_string(),
+        ])
     }
-    
+
     /// 为每个匹配的节点创建Pod
     async fn ensure_pods(&mut self) -> Result<()> {
         let matching_nodes = self.get_matching_nodes().await?;
-        
+
         for node_name in &matching_nodes {
             if !self.pods.contains_key(node_name) {
                 // 动态附加节点名
                 let pod_name = format!("{}-{}", self.name, node_name);
                 let pod_attribution_path = self.attribution_path.child(&pod_name);
-                
+
                 let mut pod = PodObject::new(
                     pod_name,
                     self.namespace.clone(),
@@ -509,12 +565,12 @@ impl DaemonSetObject {
                     self.proxy_tx.clone(),
                     self.config_manager.clone(), // 添加 config_manager
                 );
-                
+
                 pod.start().await?;
                 self.pods.insert(node_name.clone(), pod);
             }
         }
-        
+
         // 清理不再需要的Pod
         let current_nodes: Vec<String> = self.pods.keys().cloned().collect();
         for node_name in current_nodes {
@@ -524,10 +580,10 @@ impl DaemonSetObject {
                 }
             }
         }
-        
+
         Ok(())
     }
-    
+
     /// 定期监控Pod状态
     async fn monitor_pods(&mut self) -> Result<()> {
         for (node_name, pod) in &self.pods {
@@ -545,20 +601,20 @@ impl AsyncTaskObject for DaemonSetObject {
     fn object_type(&self) -> K8sObjectType {
         K8sObjectType::DaemonSet
     }
-    
+
     fn attribution_path(&self) -> &GlobalAttributionPath {
         &self.attribution_path
     }
-    
+
     async fn start(&mut self) -> Result<()> {
         tracing::info!("Starting DaemonSet: {}", self.name);
-        
+
         self.status = ComponentStatus::Starting;
         self.send_alive_signal().await?;
-        
+
         // 确保Pod在所有匹配的节点上运行
         self.ensure_pods().await?;
-        
+
         // 启动监控协程
         let attribution_path = self.attribution_path.clone();
         let proxy_tx = self.proxy_tx.clone();
@@ -569,40 +625,40 @@ impl AsyncTaskObject for DaemonSetObject {
                 // 定期监控逻辑
             }
         });
-        
+
         self.status = ComponentStatus::Running;
         self.send_alive_signal().await?;
-        
+
         tracing::info!("DaemonSet {} started successfully", self.name);
         Ok(())
     }
-    
+
     async fn stop(&mut self) -> Result<()> {
         tracing::info!("Stopping DaemonSet: {}", self.name);
-        
+
         self.status = ComponentStatus::Stopping;
         self.send_alive_signal().await?;
-        
+
         // 停止所有Pod
         for (_, mut pod) in std::mem::take(&mut self.pods) {
             pod.stop().await?;
         }
-        
+
         tracing::info!("DaemonSet {} stopped successfully", self.name);
         Ok(())
     }
-    
+
     async fn update_config(&mut self) -> Result<()> {
         tracing::info!("Updating config for DaemonSet: {}", self.name);
-        
+
         // 重新创建Pod以应用新配置
         for (_, pod) in &mut self.pods {
             pod.update_config().await?;
         }
-        
+
         Ok(())
     }
-    
+
     async fn health_check(&self) -> Result<bool> {
         // 检查所有Pod是否健康
         for (_, pod) in &self.pods {
@@ -621,13 +677,13 @@ impl DaemonSetObject {
             actor_type: "daemonset".to_string(),
             cluster_name: self.cluster_name.clone(),
             status: self.status.clone(),
-            lease_ttl: 30,
+            lease_ttl: 15,
         };
-        
+
         if let Err(_) = self.proxy_tx.send(request).await {
             tracing::warn!("Failed to send alive signal for DaemonSet: {}", self.name);
         }
-        
+
         Ok(())
     }
 }
@@ -643,7 +699,7 @@ pub struct DeploymentObject {
     pub workspace: String,
     pub cluster_name: String, // 添加集群名称
     pub replicas: i32,
-    
+
     // 运行时状态
     pub pods: HashMap<String, PodObject>, // pod_name -> pod
     // the_proxy连接
@@ -680,16 +736,16 @@ impl DeploymentObject {
             config_manager,
         }
     }
-    
+
     /// 根据replica数量和nodeaffinity随机分发Pod
     async fn ensure_pods(&mut self) -> Result<()> {
         let matching_nodes = self.get_matching_nodes().await?;
         let current_pod_count = self.pods.len() as i32;
-        
+
         // 如果Pod数量不足，创建新的Pod
         if current_pod_count < self.replicas {
             let needed = self.replicas - current_pod_count;
-            
+
             for _i in 0..needed {
                 // 随机选择节点
                 use rand::seq::SliceRandom;
@@ -697,9 +753,13 @@ impl DeploymentObject {
                 let mut rng = rand::rngs::SmallRng::from_entropy();
                 if let Some(node_name) = matching_nodes.choose(&mut rng) {
                     // 动态附加名字后缀
-                    let pod_name = format!("{}-{}", self.name, uuid::Uuid::new_v4().to_string()[..8].to_string());
+                    let pod_name = format!(
+                        "{}-{}",
+                        self.name,
+                        uuid::Uuid::new_v4().to_string()[..8].to_string()
+                    );
                     let pod_attribution_path = self.attribution_path.child(&pod_name);
-                    
+
                     let mut pod = PodObject::new(
                         pod_name.clone(),
                         self.namespace.clone(),
@@ -711,35 +771,39 @@ impl DeploymentObject {
                         self.proxy_tx.clone(),
                         self.config_manager.clone(), // 添加 config_manager
                     );
-                    
+
                     pod.start().await?;
                     self.pods.insert(pod_name, pod);
                 }
             }
         }
-        
+
         // 如果Pod数量过多，删除多余的Pod
         if current_pod_count > self.replicas {
             let excess = current_pod_count - self.replicas;
             let mut pods_to_remove = Vec::new();
-            
+
             for (pod_name, _) in self.pods.iter().take(excess as usize) {
                 pods_to_remove.push(pod_name.clone());
             }
-            
+
             for pod_name in pods_to_remove {
                 if let Some(mut pod) = self.pods.remove(&pod_name) {
                     pod.stop().await?;
                 }
             }
         }
-        
+
         Ok(())
     }
-    
+
     async fn get_matching_nodes(&self) -> Result<Vec<String>> {
         // 实现节点选择逻辑
-        Ok(vec!["node1".to_string(), "node2".to_string(), "node3".to_string()])
+        Ok(vec![
+            "node1".to_string(),
+            "node2".to_string(),
+            "node3".to_string(),
+        ])
     }
 }
 
@@ -748,50 +812,50 @@ impl AsyncTaskObject for DeploymentObject {
     fn object_type(&self) -> K8sObjectType {
         K8sObjectType::Deployment
     }
-    
+
     fn attribution_path(&self) -> &GlobalAttributionPath {
         &self.attribution_path
     }
-    
+
     async fn start(&mut self) -> Result<()> {
         tracing::info!("Starting Deployment: {}", self.name);
-        
+
         self.status = ComponentStatus::Starting;
         self.send_alive_signal().await?;
-        
+
         self.ensure_pods().await?;
-        
+
         self.status = ComponentStatus::Running;
         self.send_alive_signal().await?;
-        
+
         tracing::info!("Deployment {} started successfully", self.name);
         Ok(())
     }
-    
+
     async fn stop(&mut self) -> Result<()> {
         tracing::info!("Stopping Deployment: {}", self.name);
-        
+
         self.status = ComponentStatus::Stopping;
         self.send_alive_signal().await?;
-        
+
         for (_, mut pod) in std::mem::take(&mut self.pods) {
             pod.stop().await?;
         }
-        
+
         tracing::info!("Deployment {} stopped successfully", self.name);
         Ok(())
     }
-    
+
     async fn update_config(&mut self) -> Result<()> {
         tracing::info!("Updating config for Deployment: {}", self.name);
-        
+
         for (_, pod) in &mut self.pods {
             pod.update_config().await?;
         }
-        
+
         Ok(())
     }
-    
+
     async fn health_check(&self) -> Result<bool> {
         for (_, pod) in &self.pods {
             if !pod.health_check().await? {
@@ -809,13 +873,13 @@ impl DeploymentObject {
             actor_type: "deployment".to_string(),
             cluster_name: self.cluster_name.clone(),
             status: self.status.clone(),
-            lease_ttl: 30,
+            lease_ttl: 15,
         };
-        
+
         if let Err(_) = self.proxy_tx.send(request).await {
             tracing::warn!("Failed to send alive signal for Deployment: {}", self.name);
         }
-        
+
         Ok(())
     }
 }
@@ -830,13 +894,13 @@ pub struct PodObject {
     pub container_spec: ContainerSpec,
     pub workspace: String,
     pub cluster_name: String, // 添加集群名称
-    
+
     // 运行时状态
     pub container_id: Option<String>,
     // the_proxy连接
     pub proxy_tx: mpsc::Sender<ActorAliveRequest>,
     pub status: ComponentStatus,
-    
+
     // 添加 ConfigManager 引用以写入 etcd
     pub config_manager: Arc<ConfigManager>,
 }
@@ -867,12 +931,12 @@ impl PodObject {
             config_manager,
         }
     }
-    
+
     /// 将 pod 状态保存到 etcd
     async fn save_to_etcd(&self) -> Result<()> {
         let etcd_manager = self.config_manager.get_etcd_manager();
         let pod_key = format!("/nokube/{}/pods/{}", self.cluster_name, self.name);
-        
+
         // 构建 pod 信息 JSON
         let pod_info = serde_json::json!({
             "name": self.name,
@@ -882,7 +946,7 @@ impl PodObject {
             "container_id": self.container_id,
             "status": match self.status {
                 ComponentStatus::Starting => "Pending",
-                ComponentStatus::Running => "Running", 
+                ComponentStatus::Running => "Running",
                 ComponentStatus::Stopping => "Terminating",
                 ComponentStatus::Failed => "Failed",
                 ComponentStatus::Stopped => "Failed",
@@ -899,34 +963,38 @@ impl PodObject {
                 "component": "pod"
             },
             "ports": self.container_spec.command.as_ref()
-                .map(|cmd| if cmd.iter().any(|c| c.contains("port")) { 
-                    vec!["8080/TCP".to_string()] 
-                } else { 
-                    Vec::<String>::new() 
+                .map(|cmd| if cmd.iter().any(|c| c.contains("port")) {
+                    vec!["8080/TCP".to_string()]
+                } else {
+                    Vec::<String>::new()
                 })
                 .unwrap_or_default(),
             "priority": 0
         });
-        
+
         etcd_manager.put(pod_key, pod_info.to_string()).await?;
-        tracing::info!("Saved pod {} to etcd for cluster {}", self.name, self.cluster_name);
-        
+        tracing::info!(
+            "Saved pod {} to etcd for cluster {}",
+            self.name,
+            self.cluster_name
+        );
+
         // 同时保存事件信息
         self.save_events_to_etcd().await?;
-        
+
         Ok(())
     }
-    
+
     /// 将 pod 事件保存到 etcd
     async fn save_events_to_etcd(&self) -> Result<()> {
         let etcd_manager = self.config_manager.get_etcd_manager();
         let events_key = format!("/nokube/{}/events/pod/{}", self.cluster_name, self.name);
-        
+
         let events = match self.status {
             ComponentStatus::Starting => vec![
                 serde_json::json!({
                     "type": "Normal",
-                    "reason": "Scheduled", 
+                    "reason": "Scheduled",
                     "message": format!("Successfully assigned {}/{} to {}", self.namespace, self.name, self.node_name),
                     "age": "1m",
                     "timestamp": chrono::Utc::now().to_rfc3339()
@@ -935,9 +1003,9 @@ impl PodObject {
                     "type": "Normal",
                     "reason": "Pulling",
                     "message": format!("Pulling image \"{}\"", self.container_spec.image),
-                    "age": "30s", 
+                    "age": "30s",
                     "timestamp": chrono::Utc::now().to_rfc3339()
-                })
+                }),
             ],
             ComponentStatus::Running => vec![
                 serde_json::json!({
@@ -948,7 +1016,7 @@ impl PodObject {
                     "timestamp": chrono::Utc::now().to_rfc3339()
                 }),
                 serde_json::json!({
-                    "type": "Normal", 
+                    "type": "Normal",
                     "reason": "Pulled",
                     "message": format!("Successfully pulled image \"{}\"", self.container_spec.image),
                     "age": "1m",
@@ -963,65 +1031,79 @@ impl PodObject {
                 }),
                 serde_json::json!({
                     "type": "Normal",
-                    "reason": "Started", 
+                    "reason": "Started",
                     "message": format!("Started container {}", self.name),
                     "age": "1m",
                     "timestamp": chrono::Utc::now().to_rfc3339()
-                })
+                }),
             ],
-            _ => vec![
-                serde_json::json!({
-                    "type": "Warning",
-                    "reason": "FailedMount",
-                    "message": "Failed to mount volumes",
-                    "age": "1m",
-                    "timestamp": chrono::Utc::now().to_rfc3339()
-                })
-            ]
+            _ => vec![serde_json::json!({
+                "type": "Warning",
+                "reason": "FailedMount",
+                "message": "Failed to mount volumes",
+                "age": "1m",
+                "timestamp": chrono::Utc::now().to_rfc3339()
+            })],
         };
-        
-        etcd_manager.put(events_key, serde_json::Value::Array(events).to_string()).await?;
-        tracing::info!("Saved pod {} events to etcd for cluster {}", self.name, self.cluster_name);
-        
+
+        etcd_manager
+            .put(events_key, serde_json::Value::Array(events).to_string())
+            .await?;
+        tracing::info!(
+            "Saved pod {} events to etcd for cluster {}",
+            self.name,
+            self.cluster_name
+        );
+
         Ok(())
     }
-    
+
     /// 准备挂载的config和secret
     async fn prepare_mounts(&self) -> Result<()> {
         let pod_workspace = self.attribution_path.workspace_path(&self.workspace);
         std::fs::create_dir_all(&pod_workspace)?;
-        
+
         // 创建config目录
         let config_dir = format!("{}/config", pod_workspace);
         std::fs::create_dir_all(&config_dir)?;
-        
+
         // 创建secret目录
         let secret_dir = format!("{}/secret", pod_workspace);
         std::fs::create_dir_all(&secret_dir)?;
-        
+
         tracing::info!("Prepared mount directories for Pod: {}", self.name);
         Ok(())
     }
-    
+
     /// 启动Docker容器（模拟 - 实际容器管理由ServiceModeAgent的ProcessManager处理）
     async fn start_container(&mut self) -> Result<()> {
         self.prepare_mounts().await?;
-        
+
         // 模拟容器ID，实际容器由ServiceModeAgent管理
         let container_name = format!("nokube-pod-{}", self.name);
-        self.container_id = Some(format!("simulated-{}-{}", container_name, uuid::Uuid::new_v4().to_string()[..8].to_string()));
-        
-        tracing::info!("Pod {} container management delegated to ServiceModeAgent", self.name);
+        self.container_id = Some(format!(
+            "simulated-{}-{}",
+            container_name,
+            uuid::Uuid::new_v4().to_string()[..8].to_string()
+        ));
+
+        tracing::info!(
+            "Pod {} container management delegated to ServiceModeAgent",
+            self.name
+        );
         tracing::info!("Expected container name: {}", container_name);
-        tracing::info!("Container {} logs will be collected by ServiceModeAgent LogCollector", container_name);
-        
+        tracing::info!(
+            "Container {} logs will be collected by ServiceModeAgent LogCollector",
+            container_name
+        );
+
         Ok(())
     }
 }
 
 #[async_trait::async_trait]
-impl ActorSupervise for PodObject {
-    async fn supervise_parent(&self) -> anyhow::Result<()> {
+impl ActorOrphanCleanup for PodObject {
+    async fn cleanup_if_orphaned(&self) -> anyhow::Result<()> {
         // 解析父路径，形如 "deployment/<name>"
         let parent = self.attribution_path.parent();
         if let Some(p) = parent {
@@ -1032,30 +1114,42 @@ impl ActorSupervise for PodObject {
                 let etcd = self.config_manager.get_etcd_manager();
                 // 根据父类型检查 etcd 是否存在
                 let key = match actor_type {
-                    "deployment" => format!("/nokube/{}/deployments/{}", self.cluster_name, actor_name),
-                    "daemonset" => format!("/nokube/{}/daemonsets/{}", self.cluster_name, actor_name),
+                    "deployment" => {
+                        format!("/nokube/{}/deployments/{}", self.cluster_name, actor_name)
+                    }
+                    "daemonset" => {
+                        format!("/nokube/{}/daemonsets/{}", self.cluster_name, actor_name)
+                    }
                     _ => String::new(),
                 };
                 if !key.is_empty() {
                     match etcd.get(key.clone()).await {
                         Ok(kvs) if kvs.is_empty() => {
-                            // 父不存在：自清理
+                            // 父不存在：执行中心调度的清理流程
                             let container_name = format!("nokube-pod-{}", self.name);
                             tracing::info!(
-                                "Actor supervise: parent missing for pod '{}'(parent={} {}), stopping container '{}'",
+                                "KubeController orphan cleanup: parent missing for pod '{}'(parent={} {}), stopping container '{}'",
                                 self.name, actor_type, actor_name, container_name
                             );
                             let _ = crate::agent::general::DockerRunner::stop(&container_name);
-                            let _ = crate::agent::general::DockerRunner::remove_container(&container_name);
+                            let _ = crate::agent::general::DockerRunner::remove_container(
+                                &container_name,
+                            );
                             // 清理 etcd pod/events
-                            let pod_key = format!("/nokube/{}/pods/{}", self.cluster_name, self.name);
+                            let pod_key =
+                                format!("/nokube/{}/pods/{}", self.cluster_name, self.name);
                             let _ = etcd.delete(pod_key).await;
-                            let events_key = format!("/nokube/{}/events/pod/{}", self.cluster_name, self.name);
+                            let events_key =
+                                format!("/nokube/{}/events/pod/{}", self.cluster_name, self.name);
                             let _ = etcd.delete(events_key).await;
                         }
                         Ok(_) => {}
                         Err(e) => {
-                            tracing::warn!("Actor supervise: etcd get {} failed: {}", key, e);
+                            tracing::warn!(
+                                "KubeController orphan cleanup: etcd get {} failed: {}",
+                                key,
+                                e
+                            );
                         }
                     }
                 }
@@ -1070,58 +1164,61 @@ impl AsyncTaskObject for PodObject {
     fn object_type(&self) -> K8sObjectType {
         K8sObjectType::Pod
     }
-    
+
     fn attribution_path(&self) -> &GlobalAttributionPath {
         &self.attribution_path
     }
-    
+
     async fn start(&mut self) -> Result<()> {
         tracing::info!("Starting Pod: {}", self.name);
-        
+
         self.status = ComponentStatus::Starting;
         self.send_alive_signal().await?;
-        
+
         // 保存 Starting 状态到 etcd
         self.save_to_etcd().await?;
-        
+
         self.start_container().await?;
-        
+
         self.status = ComponentStatus::Running;
         self.send_alive_signal().await?;
-        
+
         // 保存 Running 状态到 etcd
         self.save_to_etcd().await?;
-        
+
         tracing::info!("Pod {} started successfully", self.name);
         Ok(())
     }
-    
+
     async fn stop(&mut self) -> Result<()> {
         tracing::info!("Stopping Pod: {}", self.name);
-        
+
         self.status = ComponentStatus::Stopping;
         self.send_alive_signal().await?;
-        
+
         if let Some(container_id) = &self.container_id {
-            tracing::info!("Pod {} container stopping delegated to ServiceModeAgent", self.name);
+            tracing::info!(
+                "Pod {} container stopping delegated to ServiceModeAgent",
+                self.name
+            );
             tracing::info!("Container ID: {}", container_id);
         }
-        
+
         self.container_id = None;
         tracing::info!("Pod {} stopped successfully", self.name);
         Ok(())
     }
-    
+
     async fn update_config(&mut self) -> Result<()> {
         tracing::info!("Updating config for Pod: {}", self.name);
-        
+
         // 重启容器以应用新配置
         self.stop().await?;
         self.start().await?;
-        
+
         Ok(())
     }
-    
+
     async fn health_check(&self) -> Result<bool> {
         // 简化的健康检查 - 如果有container_id就认为是运行中
         // 实际的健康检查应该由ServiceModeAgent的ProcessManager处理
@@ -1129,7 +1226,7 @@ impl AsyncTaskObject for PodObject {
             // 模拟健康检查 - 实际应该检查ServiceModeAgent管理的容器状态
             return Ok(true);
         }
-        
+
         Ok(false)
     }
 }
@@ -1141,13 +1238,13 @@ impl PodObject {
             actor_type: "pod".to_string(),
             cluster_name: self.cluster_name.clone(),
             status: self.status.clone(),
-            lease_ttl: 30, // 30秒lease过期时间
+            lease_ttl: 15, // 与设计的 30s Freshness 对齐
         };
-        
+
         if let Err(_) = self.proxy_tx.send(request).await {
             tracing::warn!("Failed to send alive signal for Pod: {}", self.name);
         }
-        
+
         Ok(())
     }
 }

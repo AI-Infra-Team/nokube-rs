@@ -1,7 +1,7 @@
+use crate::config::cluster_config::ProxyConfig;
 use anyhow::Result;
 use std::process::Command;
 use tracing::info;
-use crate::config::cluster_config::ProxyConfig;
 
 pub struct RemoteExecutor {
     proxy_config: Option<ProxyConfig>,
@@ -9,9 +9,7 @@ pub struct RemoteExecutor {
 
 impl RemoteExecutor {
     pub fn new() -> Self {
-        Self {
-            proxy_config: None,
-        }
+        Self { proxy_config: None }
     }
 
     pub fn with_proxy(proxy_config: ProxyConfig) -> Self {
@@ -43,7 +41,7 @@ impl RemoteExecutor {
 
     pub async fn execute_command(&self, command: &str) -> Result<CommandResult> {
         info!("Executing command: {}", command);
-        
+
         let mut cmd = if cfg!(target_os = "windows") {
             let mut c = Command::new("cmd");
             c.args(&["/C", command]);
@@ -70,15 +68,15 @@ impl RemoteExecutor {
 
     pub async fn execute_script(&self, script_content: &str) -> Result<CommandResult> {
         info!("Executing script");
-        
+
         // Write script to temporary file and execute it
         let temp_file = "/tmp/nokube_script.sh";
         std::fs::write(temp_file, script_content)?;
-        
+
         let mut cmd = Command::new("sh");
         cmd.arg(temp_file);
         self.apply_proxy_env(&mut cmd);
-        
+
         let output = cmd.output()?;
 
         // Clean up temporary file
