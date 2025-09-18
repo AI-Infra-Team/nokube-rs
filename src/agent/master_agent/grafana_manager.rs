@@ -1068,13 +1068,27 @@ isDefault = true
                             "type": "query",
                             "label": "Root Actor",
                             "datasource": "GreptimeDB",
-                            "query": "label_values(nokube_container_cpu_cores{cluster_name=~\"$cluster\"}, root_actor)",
+                            "query": "query_result(last_over_time(nokube_actor_status{cluster_name=~\"$cluster\", actor_level=\"root\", canonical=\"1\"}[30s]) > 0)",
                             "refresh": 1,
                             "includeAll": false,
                             "multi": true,
-                            "current": {"text": "", "value": []}
+                            "current": {"text": "", "value": []},
+                            "regex": "/root_actor=\\\"([^\\\"]+)\\\"/"
                         },
-                        {"name": "node", "type": "query", "label": "Node", "datasource": "GreptimeDB", "query": "label_values(nokube_container_mem_bytes{cluster_name=~\"$cluster\", root_actor=~\"$root_actor\"}, node)", "refresh": 1, "includeAll": true, "allValue": ".*", "multi": true, "current": {"text": "All", "value": ["$__all"]}}
+                        {
+                            "name": "container",
+                            "type": "query",
+                            "label": "Container",
+                            "datasource": "GreptimeDB",
+                            "query": "query_result(last_over_time(nokube_actor_status{cluster_name=~\"$cluster\", actor_level=\"pod\", root_actor=~\"$root_actor\", canonical=\"1\"}[30s]) > 0)",
+                            "refresh": 1,
+                            "includeAll": true,
+                            "allValue": ".*",
+                            "multi": true,
+                            "current": {"text": "All", "value": ["$__all"]},
+                            "regex": "/container=\"([^\"]+)\"/"
+                        },
+                        {"name": "node", "type": "query", "label": "Node", "datasource": "GreptimeDB", "query": "query_result(last_over_time(nokube_actor_status{cluster_name=~\"$cluster\", actor_level=\"pod\", root_actor=~\"$root_actor\", container=~\"$container\", canonical=\"1\"}[30s]) > 0)", "refresh": 1, "includeAll": true, "allValue": ".*", "multi": true, "current": {"text": "All", "value": ["$__all"]}, "regex": "/node=\"([^\"]+)\"/"}
                     ]
                 },
                 "panels": [
@@ -1094,7 +1108,7 @@ isDefault = true
                         "type": "stat",
                         "datasource": "GreptimeDB",
                         "targets": [
-                            {"expr": "count(count by (pod, container) (nokube_container_mem_bytes{cluster_name=~\"$cluster\"}))", "instant": true}
+                            {"expr": "count(count by (pod, container) ((nokube_container_mem_bytes{cluster_name=~\"$cluster\", root_actor=~\"$root_actor\", container=~\"$container\"}) and on (cluster_name, root_actor, container) (last_over_time(nokube_actor_status{cluster_name=~\"$cluster\", actor_level=\"pod\", root_actor=~\"$root_actor\", container=~\"$container\", canonical=\"1\"}[30s]) > 0)))", "instant": true}
                         ],
                         "gridPos": {"h": 4, "w": 24, "x": 0, "y": 4}
                     },
@@ -1114,7 +1128,7 @@ isDefault = true
                         "type": "table",
                         "datasource": "GreptimeDB",
                         "targets": [
-                            {"expr": "sum by (pod, node) (nokube_container_mem_bytes{cluster_name=~\"$cluster\", root_actor=~\"$root_actor\"})", "format": "table", "instant": true}
+                            {"expr": "sum by (pod, node) ((nokube_container_mem_bytes{cluster_name=~\"$cluster\", root_actor=~\"$root_actor\", container=~\"$container\"}) and on (cluster_name, root_actor, container) (last_over_time(nokube_actor_status{cluster_name=~\"$cluster\", actor_level=\"pod\", root_actor=~\"$root_actor\", container=~\"$container\", canonical=\"1\"}[30s]) > 0)))", "format": "table", "instant": true}
                         ],
                         "transformations": [
                             {"id": "labelsToFields", "options": {"mode": "columns"}},
@@ -1128,7 +1142,7 @@ isDefault = true
                         "type": "table",
                         "datasource": "GreptimeDB",
                         "targets": [
-                            {"expr": "nokube_container_mem_bytes{cluster_name=~\"$cluster\", root_actor=~\"$root_actor\"}", "format": "table", "instant": true}
+                            {"expr": "(nokube_container_mem_bytes{cluster_name=~\"$cluster\", root_actor=~\"$root_actor\", container=~\"$container\"}) and on (cluster_name, root_actor, container) (last_over_time(nokube_actor_status{cluster_name=~\"$cluster\", actor_level=\"pod\", root_actor=~\"$root_actor\", container=~\"$container\", canonical=\"1\"}[30s]) > 0)", "format": "table", "instant": true}
                         ],
                         "transformations": [
                             {"id": "labelsToFields", "options": {"mode": "columns"}},
@@ -1138,14 +1152,14 @@ isDefault = true
                             {"matcher": {"id": "byName", "options": "Container"},
                              "properties": [
                                  {"id": "links", "value": [
-                                     {"title": "View Logs", "url": "/d/nokube-logs-mysql?var-container_path=${__data.fields.container_path}", "targetBlank": true}
+                                     {"title": "View Logs", "url": "/d/nokube-logs-mysql?var-fullpath=${__data.fields.container_path}&var-container_path=${__data.fields.container_path}", "targetBlank": true}
                                  ]}
                              ]}
                             ,
                             {"matcher": {"id": "byName", "options": "container_path"},
                              "properties": [
                                  {"id": "links", "value": [
-                                     {"title": "View Logs (by Path)", "url": "/d/nokube-logs-mysql?var-container_path=${__value.raw}", "targetBlank": true}
+                                     {"title": "View Logs (by Path)", "url": "/d/nokube-logs-mysql?var-fullpath=${__value.raw}&var-container_path=${__value.raw}", "targetBlank": true}
                                  ]},
                                  {"id": "custom.hidden", "value": true}
                              ]}
@@ -1158,7 +1172,7 @@ isDefault = true
                         "type": "timeseries",
                         "datasource": "GreptimeDB",
                         "targets": [
-                            {"expr": "sum by (pod, container, node) (nokube_container_cpu_cores{cluster_name=~\"$cluster\", root_actor=~\"$root_actor\"})", "legendFormat": "{{pod}}/{{container}} @ {{node}}"}
+                            {"expr": "sum by (pod, container, node) ((nokube_container_cpu_cores{cluster_name=~\"$cluster\", root_actor=~\"$root_actor\", container=~\"$container\"}) and on (cluster_name, root_actor, container) (last_over_time(nokube_actor_status{cluster_name=~\"$cluster\", actor_level=\"pod\", root_actor=~\"$root_actor\", container=~\"$container\", canonical=\"1\"}[30s]) > 0)))", "legendFormat": "{{pod}}/{{container}} @ {{node}}"}
                         ],
                         "fieldConfig": {"defaults": {"unit": "cores", "min": 0, "custom": {"stacking": {"mode": "none"}}}},
                         "gridPos": {"h": 8, "w": 12, "x": 0, "y": 21}
@@ -1168,8 +1182,8 @@ isDefault = true
                         "title": "Container Memory (bytes) [$root_actor]",
                         "type": "timeseries",
                         "datasource": "GreptimeDB",
-                        "targets": [
-                            {"expr": "sum by (pod, container, node) (nokube_container_mem_bytes{cluster_name=~\"$cluster\", root_actor=~\"$root_actor\"})", "legendFormat": "{{pod}}/{{container}} @ {{node}}"},
+                                "targets": [
+                            {"expr": "sum by (pod, container, node) ((nokube_container_mem_bytes{cluster_name=~\"$cluster\", root_actor=~\"$root_actor\", container=~\"$container\"}) and on (cluster_name, root_actor, container) (last_over_time(nokube_actor_status{cluster_name=~\"$cluster\", actor_level=\"pod\", root_actor=~\"$root_actor\", container=~\"$container\", canonical=\"1\"}[30s]) > 0)))", "legendFormat": "{{pod}}/{{container}} @ {{node}}"},
                             {"expr": "nokube_memory_used_bytes{cluster_name=~\"$cluster\", node=~\"$node\"}", "legendFormat": "Node Used: {{node}}"},
                             {"expr": "nokube_memory_total_bytes{cluster_name=~\"$cluster\", node=~\"$node\"}", "legendFormat": "Node Total: {{node}}"}
                         ],

@@ -1,3 +1,4 @@
+use crate::agent::general::log_collector::LogCollectorCommand;
 use crate::agent::general::process_manager::ProcessManager;
 use crate::agent::general::{
     DockerRunConfig, DockerRunner, Exporter, LogCollector, LogCollectorConfig,
@@ -6,13 +7,14 @@ use crate::config::{
     cluster_config::ClusterConfig, config_manager::ConfigManager, etcd_manager::EtcdManager,
 };
 use crate::k8s::actors::{ContainerSpec, DaemonSetActor, DeploymentActor, NodeAffinity};
-use crate::k8s::controllers::KubeController;
+use crate::k8s::controllers::{ContainerEvent, KubeController};
 use crate::k8s::the_proxy::TheProxy;
 use crate::k8s::GlobalAttributionPath;
 use anyhow::Result;
 use std::collections::HashMap;
 use std::process::Command;
 use std::sync::Arc;
+use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 
 /// 服务模式Agent：处理持续运行的服务管理
@@ -27,6 +29,7 @@ pub struct ServiceModeAgent {
     kube_controller: Option<KubeController>,
     log_collector: Option<LogCollector>,
     the_proxy: Option<TheProxy>,
+    exporter_events: Option<mpsc::Receiver<ContainerEvent>>,
 }
 
 impl ServiceModeAgent {
@@ -75,6 +78,7 @@ impl ServiceModeAgent {
             kube_controller: Some(kube_controller),
             log_collector: None,
             the_proxy: Some(the_proxy),
+            exporter_events: None,
         })
     }
 
@@ -85,6 +89,16 @@ impl ServiceModeAgent {
                 self.cluster_name.clone(),
                 Arc::clone(etcd_manager),
             );
+            if let Some(kube_controller) = &self.kube_controller {
+                let (event_tx, event_rx) = mpsc::channel(256);
+                kube_controller
+                    .register_container_listener(event_tx)
+                    .await?;
+                self.exporter_events = Some(event_rx);
+            } else {
+                warn!("Exporter initialized without kube_controller; container events unavailable");
+                self.exporter_events = None;
+            }
             self.exporter = Some(exporter);
         }
         Ok(())
@@ -158,9 +172,32 @@ impl ServiceModeAgent {
         let _ = log_collector.follow_docker_logs("nokube-httpserver").await;
 
         if let Some(kube_controller) = &self.kube_controller {
+            let (event_tx, mut event_rx) = mpsc::channel::<ContainerEvent>(256);
             kube_controller
-                .register_log_collector(log_collector.command_sender())
+                .register_container_listener(event_tx)
                 .await?;
+
+            let command_tx = log_collector.command_sender();
+            tokio::spawn(async move {
+                while let Some(event) = event_rx.recv().await {
+                    let result = match event {
+                        ContainerEvent::Started { name } => {
+                            command_tx
+                                .send(LogCollectorCommand::FollowContainer { name })
+                                .await
+                        }
+                        ContainerEvent::Stopped { name } => {
+                            command_tx
+                                .send(LogCollectorCommand::StopContainer { name })
+                                .await
+                        }
+                    };
+
+                    if let Err(e) = result {
+                        warn!("Failed to dispatch log collector command: {}", e);
+                    }
+                }
+            });
         }
 
         info!("Log collector initialized and started");
@@ -209,7 +246,8 @@ impl ServiceModeAgent {
 
         self.initialize_exporter().await?;
         if let Some(exporter) = &self.exporter {
-            exporter.start_with_etcd_polling().await?;
+            let events = self.exporter_events.take();
+            exporter.start_with_etcd_polling(events).await?;
         }
 
         // 启动监控和服务子进程
@@ -515,18 +553,19 @@ providers:
                     "timezone": "browser",
                     "panels": [
                         {"id": 1, "title": "Log Messages (Latest)", "type": "logs", "datasource": "greptimemysql",
-                         "targets": [{"format":"table","rawSql":"SELECT timestamp AS time, body AS message, severity_text AS level FROM opentelemetry_logs WHERE $__timeFilter(timestamp) AND (${container_path:sqlstring} = '' OR scope_name = ${container_path:sqlstring}) ORDER BY timestamp DESC LIMIT 1000"}],
+                         "targets": [{"format":"table","rawSql":"SELECT timestamp AS time, body AS message, severity_text AS level FROM opentelemetry_logs WHERE $__timeFilter(timestamp) AND (COALESCE(${fullpath:sqlstring}, ${container_path:sqlstring}) = '' OR scope_name = COALESCE(${fullpath:sqlstring}, ${container_path:sqlstring})) ORDER BY timestamp DESC LIMIT 1000"}],
                          "options": {"showTime": true, "showLabels": false, "showCommonLabels": false, "wrapLogMessage": false, "enableLogDetails": false, "messageField": "message"},
                          "gridPos": {"h": 12, "w": 24, "x": 0, "y": 0}},
                         {"id": 2, "title": "Log Level Distribution", "type": "piechart", "datasource": "greptimemysql",
-                         "targets": [{"format":"table","rawSql":"SELECT severity_text AS metric, COUNT(*) AS value FROM opentelemetry_logs WHERE $__timeFilter(timestamp) AND (${container_path:sqlstring} = '' OR scope_name = ${container_path:sqlstring}) GROUP BY severity_text"}],
+                         "targets": [{"format":"table","rawSql":"SELECT severity_text AS metric, COUNT(*) AS value FROM opentelemetry_logs WHERE $__timeFilter(timestamp) AND (COALESCE(${fullpath:sqlstring}, ${container_path:sqlstring}) = '' OR scope_name = COALESCE(${fullpath:sqlstring}, ${container_path:sqlstring})) GROUP BY severity_text"}],
                          "gridPos": {"h": 6, "w": 8, "x": 0, "y": 12}},
                         {"id": 3, "title": "Logs per Minute", "type": "timeseries", "datasource": "greptimemysql",
-                         "targets": [{"format":"time_series","rawSql":"SELECT $__timeGroup(timestamp, '1m') AS time, 'All Logs' AS metric, COUNT(*) AS value FROM opentelemetry_logs WHERE $__timeFilter(timestamp) AND (${container_path:sqlstring} = '' OR scope_name = ${container_path:sqlstring}) GROUP BY 1 ORDER BY 1"}],
+                         "targets": [{"format":"time_series","rawSql":"SELECT $__timeGroup(timestamp, '1m') AS time, 'All Logs' AS metric, COUNT(*) AS value FROM opentelemetry_logs WHERE $__timeFilter(timestamp) AND (COALESCE(${fullpath:sqlstring}, ${container_path:sqlstring}) = '' OR scope_name = COALESCE(${fullpath:sqlstring}, ${container_path:sqlstring})) GROUP BY 1 ORDER BY 1"}],
                          "gridPos": {"h": 6, "w": 16, "x": 8, "y": 12}}
                     ],
                     "templating": {"list": [
-                        {"name": "container_path", "type": "query", "datasource": "greptimemysql", "query": "SELECT DISTINCT scope_name AS text FROM opentelemetry_logs WHERE scope_name <> '' ORDER BY text", "refresh": 1, "includeAll": true, "allValue": "", "multi": false, "current": {"text": "", "value": ""}}
+                        {"name": "fullpath", "type": "query", "datasource": "greptimemysql", "query": "SELECT DISTINCT scope_name AS text, scope_name AS value FROM opentelemetry_logs WHERE scope_name <> '' ORDER BY text", "refresh": 1, "includeAll": true, "allValue": "", "multi": false, "current": {"text": "All", "value": "$__all"}},
+                        {"name": "container_path", "type": "query", "datasource": "greptimemysql", "query": "SELECT DISTINCT scope_name AS text, scope_name AS value FROM opentelemetry_logs WHERE scope_name <> '' ORDER BY text", "refresh": 1, "includeAll": true, "allValue": "", "multi": false, "current": {"text": "", "value": ""}, "hide": 2}
                     ]},
                     "time": {"from": "now-6h", "to": "now"},
                     "refresh": "30s",
@@ -591,6 +630,8 @@ import socket
 from urllib import request
 from urllib.error import URLError, HTTPError
 
+POD_CONTAINER_SEPARATOR = "__"
+
 class NoKubeMetricsCollector:
     def __init__(self, node_id, cluster_name, greptime_url):
         self.node_id = node_id
@@ -598,6 +639,33 @@ class NoKubeMetricsCollector:
         self.greptime_url = greptime_url.rstrip('/')
         self.actor_registry = {{}}
         
+    @staticmethod
+    def derive_actor_core(container_name, node, cluster):
+        stripped = container_name[len('nokube-pod-'):] if container_name.startswith('nokube-pod-') else container_name
+        if POD_CONTAINER_SEPARATOR in stripped:
+            pod_segment, container_segment = stripped.split(POD_CONTAINER_SEPARATOR, 1)
+        else:
+            pod_segment, container_segment = stripped, 'main'
+
+        core = pod_segment
+        ds_suffix = '-' + node
+        if core.endswith(ds_suffix):
+            core = core[:-len(ds_suffix)].rstrip('-')
+            cluster_suffix = '-' + cluster
+            if core.endswith(cluster_suffix):
+                core = core[:-len(cluster_suffix)].rstrip('-')
+            return pod_segment, container_segment, core, 'daemonset'
+
+        cluster_suffix = '-' + cluster
+        if core.endswith(cluster_suffix):
+            core = core[:-len(cluster_suffix)].rstrip('-')
+
+        parts = core.rsplit('-', 1)
+        if len(parts) == 2 and len(parts[1]) == 8 and all(c in '0123456789abcdefABCDEF' for c in parts[1]):
+            return pod_segment, container_segment, parts[0], 'deployment'
+
+        return pod_segment, container_segment, core, 'deployment'
+
     def collect_system_metrics(self):
         """收集系统指标"""
         cpu_percent = psutil.cpu_percent(interval=1)
@@ -614,7 +682,7 @@ class NoKubeMetricsCollector:
             'cluster_name': self.cluster_name
         }}
     
-    def collect_actor_metrics(self):
+    def collect_k8s_actor_metrics(self):
         """收集 Actor 指标（仅依据实际运行中的容器）"""
         metrics = []
         timestamp = int(time.time())
@@ -657,8 +725,6 @@ class NoKubeMetricsCollector:
                     'actor_name': actor_name,
                     'status': obj_status,
                     'parent_actor': parent_kind + '/' + parent_name,
-                    'node_id': self.node_id,
-                    'cluster_name': self.cluster_name,
                 }}
             }})
 
@@ -673,8 +739,6 @@ class NoKubeMetricsCollector:
                     'parent_daemonset': (parent_kind + '/' + parent_name) if parent_kind == 'daemonset' else '',
                     'parent_deployment': (parent_kind + '/' + parent_name) if parent_kind == 'deployment' else '',
                     'status': obj_status,
-                    'node_id': self.node_id,
-                    'cluster_name': self.cluster_name,
                 }}
             }})
 
@@ -686,7 +750,6 @@ class NoKubeMetricsCollector:
         metrics = []
         timestamp = int(time.time())
 
-        # 获取所有容器的实时资源（一次性读取避免多次开销）
         stats = {{}}
         try:
             out = subprocess.run(
@@ -700,17 +763,17 @@ class NoKubeMetricsCollector:
                     if len(parts) < 4:
                         continue
                     stats[parts[0]] = {{
-                        'cpu': parts[1],  # e.g. '0.15%'
-                        'mem_usage': parts[2],  # e.g. '68.8MiB / 7.68GiB'
-                        'mem_pct': parts[3],  # e.g. '0.88%'
+                        'cpu': parts[1],
+                        'mem_usage': parts[2],
+                        'mem_pct': parts[3],
                     }}
         except Exception:
             pass
 
         def parse_bytes(s):
             try:
-                val = s.strip().split(' ')[0]  # '68.8MiB'
-                num = float(''.join([c for c in val if c.isdigit() or c=='.']))
+                val = s.strip().split(' ')[0]
+                num = float(''.join([c for c in val if c.isdigit() or c == '.']))
                 unit = ''.join([c for c in val if c.isalpha()])
                 mul = 1.0
                 if unit.lower() in ['b']:
@@ -727,10 +790,18 @@ class NoKubeMetricsCollector:
             except Exception:
                 return 0
 
-        # 遍历当前运行中的 actor 容器
         try:
-            ps = subprocess.run(['docker', 'ps', '--format', '{{{{.Names}}}}\t{{{{.Status}}}}'],
-                                 capture_output=True, text=True, timeout=5)
+            cpu_cores = os.cpu_count() or 1
+        except Exception:
+            cpu_cores = 1
+
+        seen_roots = {{}}
+        seen_pods = {{}}
+
+        try:
+            ps = subprocess.run(
+                ['docker', 'ps', '--format', '{{{{.Names}}}}\t{{{{.Status}}}}'],
+                capture_output=True, text=True, timeout=5)
             if ps.returncode == 0:
                 for line in ps.stdout.split('\n'):
                     if not line.strip():
@@ -741,78 +812,114 @@ class NoKubeMetricsCollector:
                     name, status = name_status[0], name_status[1]
                     if not name.startswith('nokube-pod-'):
                         continue
-                    actor_name = name[len('nokube-pod-'):]
-                    is_daemonset = actor_name.endswith('-' + self.node_id)
-                    actor_type = 'daemonset' if is_daemonset else 'deployment'
-                    # Actor状态（容器Up即Running）
+
+                    pod_segment, container_segment, core_actor, owner_type = self.derive_actor_core(
+                        name, self.node_id, self.cluster_name)
+                    canonical_root = f"{{core_actor}}-{{self.cluster_name}}"
+                    container_path = f"{{self.cluster_name}}/{{core_actor}}/{{pod_segment}}/{{container_segment}}"
+
+                    base_labels = {{
+                        'container': name,
+                        'container_name': name,
+                        'pod': pod_segment,
+                        'pod_name': pod_segment,
+                        'parent_actor': canonical_root,
+                        'root_actor': canonical_root,
+                        'top_actor': canonical_root,
+                        'upper_actor': canonical_root,
+                        'owner_type': owner_type,
+                        'container_path': container_path,
+                        'canonical': '1',
+                    }}
+
+                    status_value = 1 if 'Up' in status else -1
                     metrics.append({{
-                        'metric_name': 'nokube_actor_status',
+                        'metric_name': 'nokube_container_status',
                         'timestamp': timestamp,
-                        'value': 1 if 'Up' in status else 0,
-                        'labels': {{
-                            'actor_type': actor_type,
-                            'actor_name': actor_name if not is_daemonset else actor_name[:-(len(self.node_id)+1)],
-                            'namespace': 'default',
-                            'status': 'Running' if 'Up' in status else 'Unknown',
-                            'cluster_name': self.cluster_name,
-                            'node_id': self.node_id,
-                        }}
+                        'value': status_value,
+                        'labels': base_labels.copy(),
                     }})
 
-                    # 容器资源（CPU 百分比；内存字节数）
                     st = stats.get(name)
                     if st:
                         try:
-                            cpu = float(st['cpu'].strip().rstrip('%'))
+                            cpu_pct = float(st['cpu'].strip().rstrip('%'))
                         except Exception:
-                            cpu = 0.0
-                        mem_bytes = 0
+                            cpu_pct = 0.0
                         try:
                             mem_usage = st['mem_usage'].split('/')[0]
                             mem_bytes = parse_bytes(mem_usage)
                         except Exception:
-                            pass
+                            mem_bytes = 0
+                        try:
+                            mem_pct = float(st.get('mem_pct', '0').strip().rstrip('%'))
+                        except Exception:
+                            mem_pct = 0.0
 
                         metrics.append({{
                             'metric_name': 'nokube_container_cpu_usage',
                             'timestamp': timestamp,
-                            'value': cpu,
-                            'labels': {{
-                                'container_name': name,
-                                'namespace': 'default',
-                                'actor_kind': 'container',
-                                'node_id': self.node_id,
-                                'cluster_name': self.cluster_name,
-                            }}
+                            'value': cpu_pct,
+                            'labels': base_labels.copy(),
+                        }})
+                        metrics.append({{
+                            'metric_name': 'nokube_container_cpu_cores',
+                            'timestamp': timestamp,
+                            'value': (cpu_pct / 100.0) * float(cpu_cores),
+                            'labels': base_labels.copy(),
                         }})
                         metrics.append({{
                             'metric_name': 'nokube_container_memory_usage',
                             'timestamp': timestamp,
                             'value': mem_bytes,
-                            'labels': {{
-                                'container_name': name,
-                                'namespace': 'default',
-                                'actor_kind': 'container',
-                                'node_id': self.node_id,
-                                'cluster_name': self.cluster_name,
-                            }}
+                            'labels': base_labels.copy(),
                         }})
-                        # 同时上报内存百分比（用于百分比面板）
-                        try:
-                            mem_pct = float(st.get('mem_pct','0').strip().rstrip('%'))
-                        except Exception:
-                            mem_pct = 0.0
                         metrics.append({{
                             'metric_name': 'nokube_container_mem_percent',
                             'timestamp': timestamp,
                             'value': mem_pct,
+                            'labels': base_labels.copy(),
+                        }})
+
+                    if canonical_root not in seen_roots:
+                        seen_roots[canonical_root] = owner_type
+                        metrics.append({{
+                            'metric_name': 'nokube_actor_status',
+                            'timestamp': timestamp,
+                            'value': status_value,
                             'labels': {{
+                                'actor': canonical_root,
+                                'actor_level': 'root',
+                                'root_actor': canonical_root,
+                                'top_actor': canonical_root,
+                                'upper_actor': canonical_root,
+                                'owner_type': owner_type,
+                                'canonical': '1',
+                            }},
+                        }})
+
+                    pod_key = (canonical_root, pod_segment)
+                    if pod_key not in seen_pods:
+                        seen_pods[pod_key] = True
+                        metrics.append({{
+                            'metric_name': 'nokube_actor_status',
+                            'timestamp': timestamp,
+                            'value': status_value,
+                            'labels': {{
+                                'actor': pod_segment,
+                                'actor_level': 'pod',
+                                'root_actor': canonical_root,
+                                'top_actor': canonical_root,
+                                'upper_actor': canonical_root,
+                                'owner_type': owner_type,
+                                'parent_actor': canonical_root,
+                                'pod': pod_segment,
+                                'pod_name': pod_segment,
+                                'container': name,
                                 'container_name': name,
-                                'namespace': 'default',
-                                'actor_kind': 'container',
-                                'node_id': self.node_id,
-                                'cluster_name': self.cluster_name,
-                            }}
+                                'container_path': container_path,
+                                'canonical': '1',
+                            }},
                         }})
         except Exception:
             pass
@@ -829,7 +936,14 @@ class NoKubeMetricsCollector:
             # normalize tag values (escape commas/spaces)
             def esc(v):
                 return str(v).replace(' ', '\\ ').replace(',', '\\,')
-            tag_parts = ['cluster_name=' + esc(self.cluster_name), 'node_id=' + esc(self.node_id)]
+            for redundant in ['cluster_name', 'node', 'node_id', 'instance']:
+                labels.pop(redundant, None)
+            tag_parts = [
+                'cluster_name=' + esc(self.cluster_name),
+                'node=' + esc(self.node_id),
+                'instance=' + esc(self.node_id),
+                'node_id=' + esc(self.node_id),
+            ]
             for k, v in labels.items():
                 if v is None or v == '':
                     continue
@@ -869,7 +983,7 @@ class NoKubeMetricsCollector:
                 print(json.dumps(system_metrics))
                 
                 # 收集k8sActor指标
-                k8s_metrics = self.collect_actor_metrics()
+                k8s_metrics = self.collect_k8s_actor_metrics()
                 print("=== K8s Objects ===")
                 for metric in k8s_metrics:
                     print(json.dumps(metric))

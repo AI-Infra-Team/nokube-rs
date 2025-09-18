@@ -1,5 +1,4 @@
 // KubeController - 负责监控初始Actor是否正常运行
-use crate::agent::general::log_collector::LogCollectorCommand;
 use crate::agent::runtime::deployment::{
     calc_hash_u64, create_deployment_container, enumerate_actor_container_names,
 };
@@ -14,6 +13,12 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio::time::{interval, Duration};
 use tracing::{error, info, warn};
+
+#[derive(Debug, Clone)]
+pub enum ContainerEvent {
+    Started { name: String },
+    Stopped { name: String },
+}
 
 /// KubeController - 管理和监控所有k8sActor
 pub struct KubeController {
@@ -30,7 +35,7 @@ pub struct KubeController {
     pub proxy_tx: mpsc::Sender<ActorAliveRequest>,
 
     etcd_manager: Arc<EtcdManager>,
-    log_notifier: Arc<Mutex<Option<mpsc::Sender<LogCollectorCommand>>>>,
+    container_listeners: Arc<Mutex<Vec<mpsc::Sender<ContainerEvent>>>>,
 
     // 运行状态
     pub status: ActorState,
@@ -55,28 +60,25 @@ impl KubeController {
             deployments: Arc::new(RwLock::new(HashMap::new())),
             proxy_tx,
             etcd_manager,
-            log_notifier: Arc::new(Mutex::new(None)),
+            container_listeners: Arc::new(Mutex::new(Vec::new())),
             status: ActorState::Starting,
         }
     }
 
-    pub async fn register_log_collector(
+    pub async fn register_container_listener(
         &self,
-        sender: mpsc::Sender<LogCollectorCommand>,
+        sender: mpsc::Sender<ContainerEvent>,
     ) -> Result<()> {
         {
-            let mut guard = self.log_notifier.lock().await;
-            *guard = Some(sender.clone());
+            let mut guard = self.container_listeners.lock().await;
+            guard.push(sender.clone());
         }
 
-        self.send_existing_container_notifications(&sender).await;
+        self.send_existing_container_events(&sender).await;
         Ok(())
     }
 
-    async fn send_existing_container_notifications(
-        &self,
-        sender: &mpsc::Sender<LogCollectorCommand>,
-    ) {
+    async fn send_existing_container_events(&self, sender: &mpsc::Sender<ContainerEvent>) {
         let runtime_path = crate::agent::general::DockerRunner::get_runtime_path()
             .unwrap_or_else(|_| "docker".to_string());
         match Command::new(&runtime_path)
@@ -88,13 +90,13 @@ impl KubeController {
                 for name in stdout.lines() {
                     if name.starts_with("nokube-pod-") {
                         if let Err(e) = sender
-                            .send(LogCollectorCommand::FollowContainer {
+                            .send(ContainerEvent::Started {
                                 name: name.to_string(),
                             })
                             .await
                         {
                             warn!(
-                                "Failed to enqueue existing container follow command ({}): {}",
+                                "Failed to send existing container start event ({}): {}",
                                 name, e
                             );
                         }
@@ -110,53 +112,54 @@ impl KubeController {
         }
     }
 
-    async fn publish_follow_commands(
-        notifier: &Arc<Mutex<Option<mpsc::Sender<LogCollectorCommand>>>>,
+    async fn notify_containers_started(
+        listeners: &Arc<Mutex<Vec<mpsc::Sender<ContainerEvent>>>>,
         containers: &[String],
     ) {
-        if containers.is_empty() {
-            return;
-        }
-
-        let maybe_tx = {
-            let guard = notifier.lock().await;
-            guard.clone()
-        };
-
-        if let Some(tx) = maybe_tx {
-            for name in containers {
-                if let Err(e) = tx
-                    .send(LogCollectorCommand::FollowContainer { name: name.clone() })
-                    .await
-                {
-                    warn!("Failed to notify log collector to follow {}: {}", name, e);
-                }
-            }
-        }
+        Self::broadcast_container_events(listeners, containers, true).await;
     }
 
-    async fn publish_stop_commands(
-        notifier: &Arc<Mutex<Option<mpsc::Sender<LogCollectorCommand>>>>,
+    async fn notify_containers_stopped(
+        listeners: &Arc<Mutex<Vec<mpsc::Sender<ContainerEvent>>>>,
         containers: &[String],
+    ) {
+        Self::broadcast_container_events(listeners, containers, false).await;
+    }
+
+    async fn broadcast_container_events(
+        listeners: &Arc<Mutex<Vec<mpsc::Sender<ContainerEvent>>>>,
+        containers: &[String],
+        started: bool,
     ) {
         if containers.is_empty() {
             return;
         }
 
-        let maybe_tx = {
-            let guard = notifier.lock().await;
+        let senders = {
+            let guard = listeners.lock().await;
             guard.clone()
         };
 
-        if let Some(tx) = maybe_tx {
+        let mut stale: Vec<mpsc::Sender<ContainerEvent>> = Vec::new();
+
+        for tx in &senders {
             for name in containers {
-                if let Err(e) = tx
-                    .send(LogCollectorCommand::StopContainer { name: name.clone() })
-                    .await
-                {
-                    warn!("Failed to notify log collector to stop {}: {}", name, e);
+                let event = if started {
+                    ContainerEvent::Started { name: name.clone() }
+                } else {
+                    ContainerEvent::Stopped { name: name.clone() }
+                };
+
+                if tx.send(event).await.is_err() {
+                    stale.push(tx.clone());
+                    break;
                 }
             }
+        }
+
+        if !stale.is_empty() {
+            let mut guard = listeners.lock().await;
+            guard.retain(|existing| !stale.iter().any(|st| st.same_channel(existing)));
         }
     }
 
@@ -264,7 +267,7 @@ impl KubeController {
         let daemonsets = self.daemonsets.clone();
         let deployments = self.deployments.clone();
         let etcd_manager = Arc::clone(&self.etcd_manager);
-        let log_notifier = Arc::clone(&self.log_notifier);
+        let container_listeners = Arc::clone(&self.container_listeners);
 
         tokio::spawn(async move {
             let mut interval = interval(Duration::from_secs(15)); // 更快收敛孤儿
@@ -296,7 +299,7 @@ impl KubeController {
                                 if !plan.is_empty() {
                                     KubeController::apply_action_plan(
                                         &etcd_manager,
-                                        &log_notifier,
+                                        &container_listeners,
                                         plan,
                                     )
                                     .await;
@@ -337,7 +340,7 @@ impl KubeController {
                                 if !plan.is_empty() {
                                     KubeController::apply_action_plan(
                                         &etcd_manager,
-                                        &log_notifier,
+                                        &container_listeners,
                                         plan,
                                     )
                                     .await;
@@ -361,7 +364,7 @@ impl KubeController {
 
     async fn apply_action_plan(
         etcd_manager: &Arc<EtcdManager>,
-        log_notifier: &Arc<Mutex<Option<mpsc::Sender<LogCollectorCommand>>>>,
+        container_listeners: &Arc<Mutex<Vec<mpsc::Sender<ContainerEvent>>>>,
         plan: ActorActionPlan,
     ) {
         if plan.is_empty() {
@@ -380,7 +383,7 @@ impl KubeController {
                 action.name, action.reason
             );
             let notify = vec![action.name.clone()];
-            Self::publish_stop_commands(log_notifier, &notify).await;
+            Self::notify_containers_stopped(container_listeners, &notify).await;
             if let Err(e) = crate::agent::general::DockerRunner::stop(&action.name) {
                 warn!(
                     "Failed to stop container {} during plan execution: {}",
@@ -417,7 +420,7 @@ impl KubeController {
         let etcd_manager = Arc::clone(&self.etcd_manager);
         let cluster_name = self.cluster_name.clone();
         let workspace = self.workspace.clone();
-        let log_notifier = Arc::clone(&self.log_notifier);
+        let container_listeners = Arc::clone(&self.container_listeners);
 
         tokio::spawn(async move {
             use std::collections::HashMap;
@@ -488,8 +491,8 @@ impl KubeController {
                                                 );
                                                 vec![format!("nokube-pod-{}", deployment_name)]
                                             });
-                                            KubeController::publish_follow_commands(
-                                                &log_notifier,
+                                            KubeController::notify_containers_started(
+                                                &container_listeners,
                                                 &container_names,
                                             )
                                             .await;
@@ -517,8 +520,8 @@ impl KubeController {
                                         "🔁 Detected deployment update: {} (key={}), restarting",
                                         deployment_name, key_str
                                     );
-                                    KubeController::publish_stop_commands(
-                                        &log_notifier,
+                                    KubeController::notify_containers_stopped(
+                                        &container_listeners,
                                         &previous_containers,
                                     )
                                     .await;
@@ -577,8 +580,8 @@ impl KubeController {
                                                             deployment_name
                                                         )]
                                                     });
-                                                KubeController::publish_follow_commands(
-                                                    &log_notifier,
+                                                KubeController::notify_containers_started(
+                                                    &container_listeners,
                                                     &container_names,
                                                 )
                                                 .await;
@@ -612,8 +615,8 @@ impl KubeController {
                                 deployment_name, key
                             );
                             if let Some((_, container_names)) = seen_deploy_checksums.remove(&key) {
-                                KubeController::publish_stop_commands(
-                                    &log_notifier,
+                                KubeController::notify_containers_stopped(
+                                    &container_listeners,
                                     &container_names,
                                 )
                                 .await;

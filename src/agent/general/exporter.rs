@@ -1,14 +1,17 @@
 use super::docker_runner::DockerRunner;
 use crate::agent::runtime::deployment::POD_CONTAINER_SEPARATOR;
 use crate::config::{cluster_config::ClusterConfig, etcd_manager::EtcdManager};
+use crate::k8s::controllers::ContainerEvent;
 use anyhow::Result;
+use chrono::Utc;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 use std::process::Command as StdCommand;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio::time::Duration;
-use tracing::info;
+use tracing::{info, warn};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemMetrics {
@@ -23,12 +26,118 @@ pub struct SystemMetrics {
     pub node_id: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum ActorLevel {
+    Root,
+    Pod,
+}
+
+impl ActorLevel {
+    fn as_str(&self) -> &'static str {
+        match self {
+            ActorLevel::Root => "root",
+            ActorLevel::Pod => "pod",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ActorIdentifier {
+    name: String,
+    level: ActorLevel,
+}
+
+impl ActorIdentifier {
+    fn root(name: String) -> Self {
+        Self {
+            name,
+            level: ActorLevel::Root,
+        }
+    }
+
+    fn pod(name: String) -> Self {
+        Self {
+            name,
+            level: ActorLevel::Pod,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ActorMetadata {
+    root_actor: String,
+    owner_type: String,
+    parent_actor: Option<String>,
+    pod_name: Option<String>,
+    container_name: Option<String>,
+    container_path: Option<String>,
+}
+
+impl ActorMetadata {
+    fn for_root(root_actor: String, owner_type: String) -> Self {
+        Self {
+            root_actor: root_actor.clone(),
+            owner_type,
+            parent_actor: None,
+            pod_name: None,
+            container_name: None,
+            container_path: None,
+        }
+    }
+
+    fn for_pod(
+        root_actor: String,
+        owner_type: String,
+        pod_name: String,
+        container_name: String,
+        container_path: String,
+    ) -> Self {
+        Self {
+            root_actor: root_actor.clone(),
+            owner_type,
+            parent_actor: Some(root_actor),
+            pod_name: Some(pod_name),
+            container_name: Some(container_name),
+            container_path: Some(container_path),
+        }
+    }
+
+    fn fallback(id: &ActorIdentifier) -> Self {
+        Self {
+            root_actor: id.name.clone(),
+            owner_type: "unknown".to_string(),
+            parent_actor: None,
+            pod_name: None,
+            container_name: None,
+            container_path: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ActorLifecycleEvent {
+    id: ActorIdentifier,
+    metadata: ActorMetadata,
+}
+
+#[derive(Debug, Default, Clone)]
+struct ActorLifecycleBatch {
+    starts: Vec<ActorLifecycleEvent>,
+    stops: Vec<ActorLifecycleEvent>,
+}
+
 pub struct Exporter {
     client: Client,
     node_id: String,
     cluster_name: String,
     etcd_manager: Arc<EtcdManager>,
     current_config: Arc<RwLock<Option<ClusterConfig>>>,
+    // Tracks last-seen timestamps per container so we can emit a single tombstone when it disappears.
+    container_tracker: Arc<RwLock<HashMap<String, u64>>>,
+    pending_tombstones: Arc<Mutex<HashSet<String>>>,
+    actor_tracker: Arc<RwLock<HashMap<ActorIdentifier, u64>>>,
+    pending_actor_tombstones: Arc<Mutex<HashSet<ActorIdentifier>>>,
+    actor_metadata: Arc<RwLock<HashMap<ActorIdentifier, ActorMetadata>>>,
 }
 
 impl Exporter {
@@ -39,15 +148,86 @@ impl Exporter {
             cluster_name,
             etcd_manager,
             current_config: Arc::new(RwLock::new(None)),
+            container_tracker: Arc::new(RwLock::new(HashMap::new())),
+            pending_tombstones: Arc::new(Mutex::new(HashSet::new())),
+            actor_tracker: Arc::new(RwLock::new(HashMap::new())),
+            pending_actor_tombstones: Arc::new(Mutex::new(HashSet::new())),
+            actor_metadata: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
-    pub async fn start_with_etcd_polling(&self) -> Result<()> {
+    pub async fn start_with_etcd_polling(
+        &self,
+        container_events: Option<mpsc::Receiver<ContainerEvent>>,
+    ) -> Result<()> {
         let config_poller = self.start_config_polling().await?;
         let metrics_collector = self.start_metrics_collection().await?;
-
-        tokio::try_join!(config_poller, metrics_collector)?;
+        if let Some(events) = container_events {
+            let event_listener = self.start_event_listener(events).await?;
+            tokio::try_join!(config_poller, metrics_collector, event_listener)?;
+        } else {
+            tokio::try_join!(config_poller, metrics_collector)?;
+        }
         Ok(())
+    }
+
+    async fn start_event_listener(
+        &self,
+        mut container_events: mpsc::Receiver<ContainerEvent>,
+    ) -> Result<tokio::task::JoinHandle<Result<()>>> {
+        let tracker = Arc::clone(&self.container_tracker);
+        let pending = Arc::clone(&self.pending_tombstones);
+        let actor_pending = Arc::clone(&self.pending_actor_tombstones);
+        let node_id = self.node_id.clone();
+        let cluster_name = self.cluster_name.clone();
+
+        let handle = tokio::spawn(async move {
+            while let Some(event) = container_events.recv().await {
+                match event {
+                    ContainerEvent::Started { name } => {
+                        let (pod_name, _container_segment, core_actor, _owner_type) =
+                            Exporter::derive_actor_core(&name, &node_id, &cluster_name);
+                        let canonical_root = format!("{}-{}", core_actor, cluster_name);
+                        let root_id = ActorIdentifier::root(canonical_root.clone());
+                        let pod_id = ActorIdentifier::pod(pod_name.clone());
+                        {
+                            let mut pending_guard = pending.lock().await;
+                            pending_guard.remove(&name);
+                        }
+                        {
+                            let mut actor_pending_guard = actor_pending.lock().await;
+                            actor_pending_guard.remove(&root_id);
+                            actor_pending_guard.remove(&pod_id);
+                        }
+                        let ts = Utc::now().timestamp().max(0) as u64;
+                        let mut tracker_guard = tracker.write().await;
+                        tracker_guard.insert(name, ts);
+                    }
+                    ContainerEvent::Stopped { name } => {
+                        let (pod_name, _container_segment, core_actor, _owner_type) =
+                            Exporter::derive_actor_core(&name, &node_id, &cluster_name);
+                        let canonical_root = format!("{}-{}", core_actor, cluster_name);
+                        let root_id = ActorIdentifier::root(canonical_root.clone());
+                        let pod_id = ActorIdentifier::pod(pod_name.clone());
+                        {
+                            let mut pending_guard = pending.lock().await;
+                            pending_guard.insert(name.clone());
+                        }
+                        {
+                            let mut actor_pending_guard = actor_pending.lock().await;
+                            actor_pending_guard.insert(root_id);
+                            actor_pending_guard.insert(pod_id);
+                        }
+                        let mut tracker_guard = tracker.write().await;
+                        tracker_guard.remove(&name);
+                    }
+                }
+            }
+
+            Ok(())
+        });
+
+        Ok(handle)
     }
 
     async fn start_config_polling(&self) -> Result<tokio::task::JoinHandle<Result<()>>> {
@@ -86,6 +266,11 @@ impl Exporter {
         let current_config = Arc::clone(&self.current_config);
         let client = self.client.clone();
         let node_id = self.node_id.clone();
+        let container_tracker = Arc::clone(&self.container_tracker);
+        let pending_tombstones = Arc::clone(&self.pending_tombstones);
+        let actor_tracker = Arc::clone(&self.actor_tracker);
+        let pending_actor_tombstones = Arc::clone(&self.pending_actor_tombstones);
+        let actor_metadata = Arc::clone(&self.actor_metadata);
 
         let handle = tokio::spawn(async move {
             loop {
@@ -114,14 +299,192 @@ impl Exporter {
 
                                     // 收集 actor（容器）级别指标
                                     let containers = Self::list_actor_containers();
-                                    let container_metrics = containers
-                                        .into_iter()
-                                        .filter_map(|name| {
-                                            Self::collect_container_metrics(&name)
-                                                .ok()
-                                                .map(|m| (name, m))
-                                        })
-                                        .collect::<Vec<_>>();
+                                    let mut container_metrics = Vec::new();
+                                    let mut alive_containers = HashSet::new();
+                                    let mut alive_actors: HashSet<ActorIdentifier> = HashSet::new();
+                                    let mut actor_infos: HashMap<ActorIdentifier, ActorMetadata> =
+                                        HashMap::new();
+                                    for name in containers {
+                                        alive_containers.insert(name.clone());
+                                        let (pod_name, container_segment, core_actor, owner_type) =
+                                            Self::derive_actor_core(
+                                                &name,
+                                                &node_id,
+                                                &config.cluster_name,
+                                            );
+                                        let canonical_root =
+                                            format!("{}-{}", core_actor, config.cluster_name);
+                                        let root_id = ActorIdentifier::root(canonical_root.clone());
+                                        alive_actors.insert(root_id.clone());
+                                        actor_infos.entry(root_id).or_insert_with(|| {
+                                            ActorMetadata::for_root(
+                                                canonical_root.clone(),
+                                                owner_type.clone(),
+                                            )
+                                        });
+
+                                        let pod_id = ActorIdentifier::pod(pod_name.clone());
+                                        alive_actors.insert(pod_id.clone());
+                                        let container_path = format!(
+                                            "{}/{}/{}/{}",
+                                            config.cluster_name,
+                                            core_actor,
+                                            pod_name,
+                                            container_segment
+                                        );
+                                        actor_infos.entry(pod_id).or_insert_with(|| {
+                                            ActorMetadata::for_pod(
+                                                canonical_root.clone(),
+                                                owner_type.clone(),
+                                                pod_name.clone(),
+                                                name.clone(),
+                                                container_path.clone(),
+                                            )
+                                        });
+
+                                        match Self::collect_container_metrics(&name) {
+                                            Ok(metrics) => container_metrics.push((name, metrics)),
+                                            Err(e) => warn!(
+                                                "Failed to collect metrics for container {}: {}",
+                                                name, e
+                                            ),
+                                        }
+                                    }
+
+                                    {
+                                        let mut meta_guard = actor_metadata.write().await;
+                                        for (id, meta) in &actor_infos {
+                                            meta_guard.insert(id.clone(), meta.clone());
+                                        }
+                                    }
+
+                                    let event_tombstones = {
+                                        let mut pending = pending_tombstones.lock().await;
+                                        for name in &alive_containers {
+                                            pending.remove(name);
+                                        }
+                                        pending.drain().collect::<Vec<_>>()
+                                    };
+
+                                    let grace_secs = interval_seconds.saturating_mul(2).max(30);
+                                    let time_based_exits = {
+                                        let mut tracker = container_tracker.write().await;
+                                        let now = metrics.timestamp;
+                                        for name in &alive_containers {
+                                            tracker.insert(name.clone(), now);
+                                        }
+                                        let mut exited = Vec::new();
+                                        tracker.retain(|name, last_seen| {
+                                            if alive_containers.contains(name) {
+                                                true
+                                            } else if now.saturating_sub(*last_seen) >= grace_secs {
+                                                exited.push(name.clone());
+                                                false
+                                            } else {
+                                                true
+                                            }
+                                        });
+                                        exited
+                                    };
+
+                                    let mut exited_set: HashSet<String> =
+                                        event_tombstones.into_iter().collect();
+                                    for name in time_based_exits {
+                                        exited_set.insert(name);
+                                    }
+                                    let exited_containers =
+                                        exited_set.into_iter().collect::<Vec<_>>();
+
+                                    let actor_events = {
+                                        let actor_tombstone_set: HashSet<ActorIdentifier> = {
+                                            let mut pending = pending_actor_tombstones.lock().await;
+                                            for actor in &alive_actors {
+                                                pending.remove(actor);
+                                            }
+                                            pending.drain().collect()
+                                        };
+
+                                        let mut start_ids = Vec::new();
+                                        let mut stop_ids = Vec::new();
+                                        {
+                                            let mut tracker = actor_tracker.write().await;
+                                            let now = metrics.timestamp;
+                                            for actor in &alive_actors {
+                                                if !tracker.contains_key(actor) {
+                                                    start_ids.push(actor.clone());
+                                                }
+                                                tracker.insert(actor.clone(), now);
+                                            }
+
+                                            let snapshot: Vec<(ActorIdentifier, u64)> = tracker
+                                                .iter()
+                                                .map(|(id, ts)| (id.clone(), *ts))
+                                                .collect();
+                                            for (actor_id, last_seen) in snapshot {
+                                                if !alive_actors.contains(&actor_id) {
+                                                    if actor_tombstone_set.contains(&actor_id)
+                                                        || now.saturating_sub(last_seen)
+                                                            >= grace_secs
+                                                    {
+                                                        stop_ids.push(actor_id.clone());
+                                                        tracker.remove(&actor_id);
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        let mut batch = ActorLifecycleBatch::default();
+                                        {
+                                            let meta_guard = actor_metadata.read().await;
+                                            for actor_id in start_ids {
+                                                let metadata = actor_infos
+                                                    .get(&actor_id)
+                                                    .cloned()
+                                                    .or_else(|| meta_guard.get(&actor_id).cloned())
+                                                    .unwrap_or_else(|| {
+                                                        ActorMetadata::fallback(&actor_id)
+                                                    });
+                                                batch.starts.push(ActorLifecycleEvent {
+                                                    id: actor_id,
+                                                    metadata,
+                                                });
+                                            }
+                                            for actor_id in stop_ids {
+                                                let metadata = meta_guard
+                                                    .get(&actor_id)
+                                                    .cloned()
+                                                    .unwrap_or_else(|| {
+                                                        ActorMetadata::fallback(&actor_id)
+                                                    });
+                                                batch.stops.push(ActorLifecycleEvent {
+                                                    id: actor_id,
+                                                    metadata,
+                                                });
+                                            }
+                                        }
+
+                                        batch
+                                    };
+
+                                    let actor_statuses: Vec<ActorLifecycleEvent> = {
+                                        let meta_guard = actor_metadata.read().await;
+                                        alive_actors
+                                            .iter()
+                                            .map(|actor_id| {
+                                                let metadata = actor_infos
+                                                    .get(actor_id)
+                                                    .cloned()
+                                                    .or_else(|| meta_guard.get(actor_id).cloned())
+                                                    .unwrap_or_else(|| {
+                                                        ActorMetadata::fallback(actor_id)
+                                                    });
+                                                ActorLifecycleEvent {
+                                                    id: actor_id.clone(),
+                                                    metadata,
+                                                }
+                                            })
+                                            .collect()
+                                    };
 
                                     if let Err(e) = Self::push_to_greptimedb_all(
                                         &client,
@@ -130,6 +493,9 @@ impl Exporter {
                                         &node_id,
                                         &container_metrics,
                                         &config.cluster_name,
+                                        &exited_containers,
+                                        &actor_statuses,
+                                        &actor_events,
                                     )
                                     .await
                                     {
@@ -302,6 +668,50 @@ impl Exporter {
         v.replace(' ', "\\ ").replace(',', "\\,")
     }
 
+    fn format_actor_tags(
+        cluster_name: &str,
+        node_tag: &str,
+        event: &ActorLifecycleEvent,
+    ) -> String {
+        let cluster_tag = Self::esc_tag(cluster_name);
+        let actor_tag = Self::esc_tag(&event.id.name);
+        let root_tag = Self::esc_tag(&event.metadata.root_actor);
+        let owner_tag = Self::esc_tag(&event.metadata.owner_type);
+        let level_tag = event.id.level.as_str();
+        let mut tags = format!(
+            ",cluster_name={},node={},instance={},actor={},actor_level={},root_actor={},top_actor={},upper_actor={},owner_type={},canonical=1",
+            cluster_tag,
+            node_tag,
+            node_tag,
+            actor_tag,
+            level_tag,
+            root_tag,
+            root_tag,
+            root_tag,
+            owner_tag
+        );
+        if let Some(parent) = &event.metadata.parent_actor {
+            tags.push_str(&format!(",parent_actor={}", Self::esc_tag(parent)));
+        }
+        if matches!(event.id.level, ActorLevel::Pod) {
+            let pod_value = event.metadata.pod_name.as_deref().unwrap_or(&event.id.name);
+            let pod_tag = Self::esc_tag(pod_value);
+            tags.push_str(&format!(",pod={},pod_name={}", pod_tag, pod_tag));
+            if let Some(container_name) = &event.metadata.container_name {
+                let container_tag = Self::esc_tag(container_name);
+                tags.push_str(&format!(
+                    ",container={},container_name={}",
+                    container_tag, container_tag
+                ));
+            }
+            if let Some(container_path) = &event.metadata.container_path {
+                let container_path_tag = Self::esc_tag(container_path);
+                tags.push_str(&format!(",container_path={}", container_path_tag));
+            }
+        }
+        tags
+    }
+
     fn parse_size_to_bytes(s: &str) -> u64 {
         // Supports: B, KiB, MiB, GiB, KB, MB, GB
         let s = s.trim();
@@ -463,6 +873,9 @@ impl Exporter {
         node_id: &str,
         container_metrics: &[(String, (f64, u64, f64))],
         cluster_name: &str,
+        exited_containers: &[String],
+        actor_statuses: &[ActorLifecycleEvent],
+        actor_events: &ActorLifecycleBatch,
     ) -> Result<()> {
         let instance = &metrics.node_id;
         // 为了方便格式化，准备一个闭包构建公共标签（系统级）
@@ -528,6 +941,21 @@ impl Exporter {
             sys_tags, free_bytes, ts
         ));
 
+        for event in actor_statuses {
+            let tags = Self::format_actor_tags(cluster_name, &node_tag, event);
+            influxdb_metrics.push_str(&format!("nokube_actor_status{} value=1 {}\n", tags, ts));
+        }
+
+        for event in &actor_events.starts {
+            let tags = Self::format_actor_tags(cluster_name, &node_tag, event);
+            influxdb_metrics.push_str(&format!("nokube_actor_lifecycle{} value=1 {}\n", tags, ts));
+        }
+        for event in &actor_events.stops {
+            let tags = Self::format_actor_tags(cluster_name, &node_tag, event);
+            influxdb_metrics.push_str(&format!("nokube_actor_lifecycle{} value=-1 {}\n", tags, ts));
+            influxdb_metrics.push_str(&format!("nokube_actor_status{} value=-1 {}\n", tags, ts));
+        }
+
         // 追加容器级别指标
         for (name, (cpu_pct, mem_bytes, mem_pct)) in container_metrics {
             let container_tag = Self::esc_tag(name);
@@ -564,6 +992,7 @@ impl Exporter {
                 owner_tag,
                 container_path_tag
             );
+            influxdb_metrics.push_str(&format!("nokube_container_status{} value=1 {}\n", tags, ts));
             influxdb_metrics.push_str(&format!(
                 "nokube_container_cpu{} value={} {}\n",
                 tags, cpu_pct, ts
@@ -579,6 +1008,56 @@ impl Exporter {
             influxdb_metrics.push_str(&format!(
                 "nokube_container_mem_percent{} value={} {}\n",
                 tags, mem_pct, ts
+            ));
+        }
+
+        for name in exited_containers {
+            let container_tag = Self::esc_tag(name);
+            let (pod, container_segment, core_actor, owner_type) =
+                Self::derive_actor_core(name, instance, cluster_name);
+            let canonical_upper = format!("{}-{}", core_actor, cluster_name);
+            let pod_tag = Self::esc_tag(&pod);
+            let upper_tag = Self::esc_tag(&canonical_upper);
+            let actor_tag = upper_tag.clone();
+            let owner_tag = Self::esc_tag(&owner_type);
+            let parent_tag = pod_tag.clone();
+            let container_path = format!(
+                "{}/{}/{}/{}",
+                cluster_name, core_actor, pod, container_segment
+            );
+            let container_path_tag = Self::esc_tag(&container_path);
+            let tags = format!(
+                ",cluster_name={},node={},instance={},container={},container_name={},pod={},pod_name={},parent_actor={},root_actor={},top_actor={},upper_actor={},owner_type={},container_path={},canonical=1",
+                Self::esc_tag(cluster_name),
+                node_tag,
+                node_tag,
+                container_tag,
+                container_tag,
+                pod_tag,
+                pod_tag,
+                parent_tag,
+                upper_tag,
+                actor_tag,
+                upper_tag,
+                owner_tag,
+                container_path_tag
+            );
+            influxdb_metrics.push_str(&format!(
+                "nokube_container_status{} value=-1 {}\n",
+                tags, ts
+            ));
+            influxdb_metrics.push_str(&format!("nokube_container_cpu{} value=0 {}\n", tags, ts));
+            influxdb_metrics.push_str(&format!(
+                "nokube_container_cpu_cores{} value=0 {}\n",
+                tags, ts
+            ));
+            influxdb_metrics.push_str(&format!(
+                "nokube_container_mem_bytes{} value=0 {}\n",
+                tags, ts
+            ));
+            influxdb_metrics.push_str(&format!(
+                "nokube_container_mem_percent{} value=0 {}\n",
+                tags, ts
             ));
         }
 

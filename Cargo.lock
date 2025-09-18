@@ -1058,6 +1058,7 @@ dependencies = [
  "tabled",
  "thiserror",
  "tokio",
+ "tokio-util",
  "tonic",
  "tonic-build",
  "tracing",
@@ -2100,6 +2101,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
+ "futures-util",
  "pin-project-lite",
  "tokio",
 ]

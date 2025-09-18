@@ -1595,8 +1595,9 @@ providers:
                 "timezone": "browser",
                 "templating": {"list": [
                     {"name": "cluster", "type": "query", "label": "Cluster", "datasource": "GreptimeDB", "query": "label_values(nokube_container_cpu_cores, cluster_name)", "refresh": 1, "includeAll": true, "allValue": ".*", "multi": true, "current": {"text": "All", "value": ["$__all"]}},
-                    {"name": "root_actor", "type": "query", "label": "Root Actor", "datasource": "GreptimeDB", "query": "label_values(nokube_container_cpu_cores{cluster_name=~\"$cluster\"}, root_actor)", "refresh": 1, "includeAll": false, "allValue": "", "multi": true, "current": {"text": "", "value": []}},
-                    {"name": "node", "type": "query", "label": "Node", "datasource": "GreptimeDB", "query": "label_values(nokube_container_mem_bytes{cluster_name=~\"$cluster\", root_actor=~\"$root_actor\"}, node)", "refresh": 1, "includeAll": true, "allValue": ".*", "multi": true, "current": {"text": "All", "value": ["$__all"]}}
+                    {"name": "root_actor", "type": "query", "label": "Root Actor", "datasource": "GreptimeDB", "query": "query_result(last_over_time(nokube_actor_status{cluster_name=~\"$cluster\", actor_level=\"root\", canonical=\"1\"}[30s]) > 0)", "refresh": 1, "includeAll": false, "allValue": "", "multi": true, "current": {"text": "", "value": []}, "regex": "/root_actor=\"([^\"]+)\"/"},
+                    {"name": "container", "type": "query", "label": "Container", "datasource": "GreptimeDB", "query": "query_result(last_over_time(nokube_actor_status{cluster_name=~\"$cluster\", actor_level=\"pod\", root_actor=~\"$root_actor\", canonical=\"1\"}[30s]) > 0)", "refresh": 1, "includeAll": true, "allValue": ".*", "multi": true, "current": {"text": "All", "value": ["$__all"]}, "regex": "/container=\"([^\"]+)\"/"},
+                    {"name": "node", "type": "query", "label": "Node", "datasource": "GreptimeDB", "query": "query_result(last_over_time(nokube_actor_status{cluster_name=~\"$cluster\", actor_level=\"pod\", root_actor=~\"$root_actor\", container=~\"$container\", canonical=\"1\"}[30s]) > 0)", "refresh": 1, "includeAll": true, "allValue": ".*", "multi": true, "current": {"text": "All", "value": ["$__all"]}, "regex": "/node=\"([^\"]+)\"/"}
                 ]},
                 "panels": [
                     {"id": 1, "title": "Root Actors", "type": "stat", "datasource": "GreptimeDB",
@@ -1604,13 +1605,13 @@ providers:
                         "gridPos": {"h": 4, "w": 24, "x": 0, "y": 0}
                     },
                     {"id": 2, "title": "Container Count ($cluster)", "type": "stat", "datasource": "GreptimeDB",
-                        "targets": [ {"expr": "count(count by (pod, container) (nokube_container_mem_bytes{cluster_name=~\"$cluster\"}))", "instant": true} ],
+                        "targets": [ {"expr": "count(count by (pod, container) ((nokube_container_mem_bytes{cluster_name=~\"$cluster\", root_actor=~\"$root_actor\", container=~\"$container\"}) and on (cluster_name, root_actor, container) (last_over_time(nokube_actor_status{cluster_name=~\"$cluster\", actor_level=\"pod\", root_actor=~\"$root_actor\", container=~\"$container\", canonical=\"1\"}[30s]) > 0)))", "instant": true} ],
                         "gridPos": {"h": 4, "w": 24, "x": 0, "y": 4}
                     },
 
                     {"id": 100, "type": "row", "title": "$root_actor", "repeat": "root_actor", "collapsed": false, "gridPos": {"h": 1, "w": 24, "x": 0, "y": 8}},
                     {"id": 101, "title": "Pods of $root_actor (node/pod)", "type": "table", "datasource": "GreptimeDB",
-                        "targets": [ {"expr": "sum by (pod, node) (nokube_container_mem_bytes{cluster_name=~\"$cluster\", root_actor=~\"$root_actor\"})", "format": "table", "instant": true} ],
+                        "targets": [ {"expr": "sum by (pod, node) ((nokube_container_mem_bytes{cluster_name=~\"$cluster\", root_actor=~\"$root_actor\", container=~\"$container\"}) and on (cluster_name, root_actor, container) (last_over_time(nokube_actor_status{cluster_name=~\"$cluster\", actor_level=\"pod\", root_actor=~\"$root_actor\", container=~\"$container\", canonical=\"1\"}[30s]) > 0)))", "format": "table", "instant": true} ],
                         "transformations": [
                             {"id": "labelsToFields", "options": {"mode": "columns"}},
                             {"id": "organize", "options": {"excludeByName": {"Time": true, "__name__": true, "instance": true, "job": true, "metric": true, "Value": false}, "renameByName": {"node": "Node", "pod": "Pod", "Value": "Mem Bytes"}}}
@@ -1618,7 +1619,7 @@ providers:
                         "gridPos": {"h": 8, "w": 24, "x": 0, "y": 9}
                     },
                     {"id": 102, "title": "Containers of $root_actor (node/pod/container)", "type": "table", "datasource": "GreptimeDB",
-                        "targets": [ {"expr": "nokube_container_mem_bytes{cluster_name=~\"$cluster\", root_actor=~\"$root_actor\"}", "format": "table", "instant": true} ],
+                        "targets": [ {"expr": "(nokube_container_mem_bytes{cluster_name=~\"$cluster\", root_actor=~\"$root_actor\", container=~\"$container\"}) and on (cluster_name, root_actor, container) (last_over_time(nokube_actor_status{cluster_name=~\"$cluster\", actor_level=\"pod\", root_actor=~\"$root_actor\", container=~\"$container\", canonical=\"1\"}[30s]) > 0)", "format": "table", "instant": true} ],
                         "transformations": [
                             {"id": "labelsToFields", "options": {"mode": "columns"}},
                             {"id": "organize", "options": {"excludeByName": {"Time": true, "__name__": true, "instance": true, "job": true, "metric": true, "Value": false}, "renameByName": {"node": "Node", "pod": "Pod", "container": "Container", "root_actor": "Root Actor", "Value": "Mem Bytes"}}}
@@ -1627,13 +1628,13 @@ providers:
                             {"matcher": {"id": "byName", "options": "Container"},
                              "properties": [
                                  {"id": "links", "value": [
-                                     {"title": "View Logs", "url": "/d/nokube-logs-mysql?var-container_path=${__data.fields.container_path}", "targetBlank": true}
+                                     {"title": "View Logs", "url": "/d/nokube-logs-mysql?var-fullpath=${__data.fields.container_path}&var-container_path=${__data.fields.container_path}", "targetBlank": true}
                                  ]}
                              ]},
                             {"matcher": {"id": "byName", "options": "container_path"},
                              "properties": [
                                  {"id": "links", "value": [
-                                     {"title": "View Logs (by Path)", "url": "/d/nokube-logs-mysql?var-container_path=${__value.raw}", "targetBlank": true}
+                                     {"title": "View Logs (by Path)", "url": "/d/nokube-logs-mysql?var-fullpath=${__value.raw}&var-container_path=${__value.raw}", "targetBlank": true}
                                  ]},
                                  {"id": "custom.hidden", "value": true}
                              ]}
@@ -1641,13 +1642,13 @@ providers:
                         "gridPos": {"h": 8, "w": 24, "x": 0, "y": 17}
                     },
                     {"id": 103, "title": "Container CPU (cores) [$root_actor]", "type": "timeseries", "datasource": "GreptimeDB",
-                        "targets": [ {"expr": "sum by (pod, container, node) (nokube_container_cpu_cores{cluster_name=~\"$cluster\", root_actor=~\"$root_actor\"})", "legendFormat": "{{pod}}/{{container}} @ {{node}}"} ],
+                        "targets": [ {"expr": "sum by (pod, container, node) ((nokube_container_cpu_cores{cluster_name=~\"$cluster\", root_actor=~\"$root_actor\", container=~\"$container\"}) and on (cluster_name, root_actor, container) (last_over_time(nokube_actor_status{cluster_name=~\"$cluster\", actor_level=\"pod\", root_actor=~\"$root_actor\", container=~\"$container\", canonical=\"1\"}[30s]) > 0)))", "legendFormat": "{{pod}}/{{container}} @ {{node}}"} ],
                         "fieldConfig": {"defaults": {"unit": "cores", "min": 0, "custom": {"stacking": {"mode": "none"}}}},
                         "gridPos": {"h": 8, "w": 12, "x": 0, "y": 25}
                     },
                             {"id": 104, "title": "Container Memory (bytes) [$root_actor]", "type": "timeseries", "datasource": "GreptimeDB",
                                 "targets": [
-                                    {"expr": "sum by (pod, container, node) (nokube_container_mem_bytes{cluster_name=~\"$cluster\", root_actor=~\"$root_actor\"})", "legendFormat": "{{pod}}/{{container}} @ {{node}}"},
+                                    {"expr": "sum by (pod, container, node) ((nokube_container_mem_bytes{cluster_name=~\"$cluster\", root_actor=~\"$root_actor\", container=~\"$container\"}) and on (cluster_name, root_actor, container) (last_over_time(nokube_actor_status{cluster_name=~\"$cluster\", actor_level=\"pod\", root_actor=~\"$root_actor\", container=~\"$container\", canonical=\"1\"}[30s]) > 0)))", "legendFormat": "{{pod}}/{{container}} @ {{node}}"},
                                     {"expr": "nokube_memory_used_bytes{cluster_name=~\"$cluster\", node=~\"$node\"}", "legendFormat": "Node Used: {{node}}"},
                                     {"expr": "nokube_memory_total_bytes{cluster_name=~\"$cluster\", node=~\"$node\"}", "legendFormat": "Node Total: {{node}}"}
                                 ],
@@ -1836,18 +1837,19 @@ providers:
                 "timezone": "browser",
                 "panels": [
                     {"id": 1, "title": "Log Messages (Latest)", "type": "logs", "datasource": "greptimemysql",
-                     "targets": [{"format":"table","rawSql":"SELECT timestamp AS time, body AS message, severity_text AS level FROM opentelemetry_logs WHERE $__timeFilter(timestamp) AND (${container_path:sqlstring} = '' OR scope_name = ${container_path:sqlstring}) ORDER BY timestamp DESC LIMIT 1000"}],
+                     "targets": [{"format":"table","rawSql":"SELECT timestamp AS time, body AS message, severity_text AS level FROM opentelemetry_logs WHERE $__timeFilter(timestamp) AND (COALESCE(${fullpath:sqlstring}, ${container_path:sqlstring}) = '' OR scope_name = COALESCE(${fullpath:sqlstring}, ${container_path:sqlstring})) ORDER BY timestamp DESC LIMIT 1000"}],
                      "options": {"showTime": true, "showLabels": false, "showCommonLabels": false, "wrapLogMessage": false, "enableLogDetails": false, "messageField": "message"},
                      "gridPos": {"h": 12, "w": 24, "x": 0, "y": 0}},
                     {"id": 2, "title": "Log Level Distribution", "type": "piechart", "datasource": "greptimemysql",
-                     "targets": [{"format":"table","rawSql":"SELECT severity_text AS metric, COUNT(*) AS value FROM opentelemetry_logs WHERE $__timeFilter(timestamp) AND (${container_path:sqlstring} = '' OR scope_name = ${container_path:sqlstring}) GROUP BY severity_text"}],
+                     "targets": [{"format":"table","rawSql":"SELECT severity_text AS metric, COUNT(*) AS value FROM opentelemetry_logs WHERE $__timeFilter(timestamp) AND (COALESCE(${fullpath:sqlstring}, ${container_path:sqlstring}) = '' OR scope_name = COALESCE(${fullpath:sqlstring}, ${container_path:sqlstring})) GROUP BY severity_text"}],
                      "gridPos": {"h": 6, "w": 8, "x": 0, "y": 12}},
                     {"id": 3, "title": "Logs per Minute", "type": "timeseries", "datasource": "greptimemysql",
-                     "targets": [{"format":"time_series","rawSql":"SELECT $__timeGroup(timestamp, '1m') AS time, 'All Logs' AS metric, COUNT(*) AS value FROM opentelemetry_logs WHERE $__timeFilter(timestamp) AND (${container_path:sqlstring} = '' OR scope_name = ${container_path:sqlstring}) GROUP BY 1 ORDER BY 1"}],
+                     "targets": [{"format":"time_series","rawSql":"SELECT $__timeGroup(timestamp, '1m') AS time, 'All Logs' AS metric, COUNT(*) AS value FROM opentelemetry_logs WHERE $__timeFilter(timestamp) AND (COALESCE(${fullpath:sqlstring}, ${container_path:sqlstring}) = '' OR scope_name = COALESCE(${fullpath:sqlstring}, ${container_path:sqlstring})) GROUP BY 1 ORDER BY 1"}],
                      "gridPos": {"h": 6, "w": 16, "x": 8, "y": 12}}
                 ],
                 "templating": {"list": [
-                    {"name": "container_path", "type": "query", "datasource": "greptimemysql", "query": "SELECT DISTINCT scope_name AS text FROM opentelemetry_logs WHERE scope_name <> '' ORDER BY text", "refresh": 1, "includeAll": true, "allValue": "", "multi": false, "current": {"text": "", "value": ""}}
+                    {"name": "fullpath", "type": "query", "datasource": "greptimemysql", "query": "SELECT DISTINCT scope_name AS text, scope_name AS value FROM opentelemetry_logs WHERE scope_name <> '' ORDER BY text", "refresh": 1, "includeAll": true, "allValue": "", "multi": false, "current": {"text": "All", "value": "$__all"}},
+                    {"name": "container_path", "type": "query", "datasource": "greptimemysql", "query": "SELECT DISTINCT scope_name AS text, scope_name AS value FROM opentelemetry_logs WHERE scope_name <> '' ORDER BY text", "refresh": 1, "includeAll": true, "allValue": "", "multi": false, "current": {"text": "", "value": ""}, "hide": 2}
                 ]},
                 "time": {"from": "now-6h", "to": "now"},
                 "refresh": "30s",
