@@ -1,4 +1,3 @@
-use crate::agent::master_agent::GrafanaManager;
 use crate::config::{cluster_config::ClusterConfig, ConfigManager};
 use crate::remote_ctl::SSHManager;
 use anyhow::Result;
@@ -18,7 +17,11 @@ impl DeploymentController {
         })
     }
 
-    pub async fn deploy_or_update(&mut self, cluster_name: &str) -> Result<()> {
+    pub async fn deploy_or_update(
+        &mut self,
+        cluster_name: &str,
+        deployment_version: &str,
+    ) -> Result<()> {
         info!("Starting deployment/update for cluster: {}", cluster_name);
 
         // Get cluster configuration from etcd
@@ -39,7 +42,8 @@ impl DeploymentController {
             .await?;
 
         // Deploy agents to all nodes (nodes will download artifacts from HTTP server)
-        self.deploy_node_agents(&cluster_config).await?;
+        self.deploy_node_agents(&cluster_config, deployment_version)
+            .await?;
 
         // Update node configurations and restart agents
         self.update_node_configurations(&cluster_config).await?;
@@ -566,7 +570,11 @@ impl DeploymentController {
         Ok(())
     }
 
-    async fn deploy_node_agents(&self, cluster_config: &ClusterConfig) -> Result<()> {
+    async fn deploy_node_agents(
+        &self,
+        cluster_config: &ClusterConfig,
+        deployment_version: &str,
+    ) -> Result<()> {
         info!("Deploying agents to cluster nodes");
 
         use base64::{engine::general_purpose, Engine as _};
@@ -743,47 +751,9 @@ impl DeploymentController {
                     "node_id": node.name,
                     "workspace": workspace,  // 传递 workspace 路径
                     "node_ip": node.get_ip()?,  // 传递节点IP
+                    "deployment_version": deployment_version,
                 });
 
-                // 如果是head节点且监控开启，添加Grafana配置
-                if matches!(node.role, crate::config::cluster_config::NodeRole::Head)
-                    && cluster_config.task_spec.monitoring.enabled
-                {
-                    info!("Adding Grafana configuration for head node: {}", node.name);
-                    let grafana_config = format!(
-                        r#"[server]
-http_port = 3000
-
-[security]
-admin_user = admin
-admin_password = admin
-
-[users]
-allow_sign_up = false
-
-[auth.anonymous]
-enabled = true
-org_name = Main Org.
-org_role = Viewer
-
-[datasources]
-name = GreptimeDB
-type = prometheus
-url = http://{}:{}
-access = proxy
-isDefault = true
-"#,
-                        node.get_ip()?,
-                        cluster_config.task_spec.monitoring.greptimedb.port
-                    );
-
-                    extra_params["grafana_config"] = json!(grafana_config);
-                    extra_params["grafana_port"] =
-                        json!(cluster_config.task_spec.monitoring.grafana.port);
-                    extra_params["greptimedb_port"] =
-                        json!(cluster_config.task_spec.monitoring.greptimedb.port);
-                    extra_params["setup_grafana"] = json!(true);
-                }
                 let extra_params_str = serde_json::to_string(&extra_params).unwrap_or_default();
                 let extra_params_b64 = general_purpose::STANDARD.encode(extra_params_str);
 

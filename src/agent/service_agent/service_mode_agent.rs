@@ -1,20 +1,26 @@
+use super::status::{ModuleState, ServiceDeploymentStatus};
 use crate::agent::general::log_collector::LogCollectorCommand;
 use crate::agent::general::process_manager::ProcessManager;
 use crate::agent::general::{
-    DockerRunConfig, DockerRunner, Exporter, LogCollector, LogCollectorConfig,
+    DockerRunConfig, DockerRunner, Exporter, GrafanaManager, LogCollector, LogCollectorConfig,
 };
 use crate::config::{
     cluster_config::ClusterConfig, config_manager::ConfigManager, etcd_manager::EtcdManager,
 };
-use crate::k8s::actors::{ContainerSpec, DaemonSetActor, DeploymentActor, NodeAffinity};
+use crate::k8s::actors::{ContainerSpec, DaemonSetActor, NodeAffinity};
 use crate::k8s::controllers::{ContainerEvent, KubeController};
 use crate::k8s::the_proxy::TheProxy;
 use crate::k8s::GlobalAttributionPath;
-use anyhow::Result;
+use anyhow::{anyhow, Result};
+use chrono::Utc;
+use reqwest::Client;
+use serde_json;
 use std::collections::HashMap;
 use std::process::Command;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
+use tokio::time::sleep;
 use tracing::{error, info, warn};
 
 /// 服务模式Agent：处理持续运行的服务管理
@@ -24,6 +30,7 @@ pub struct ServiceModeAgent {
     config: ClusterConfig,
     node_id: String,
     cluster_name: String,
+    deployment_version: String,
     etcd_manager: Option<Arc<EtcdManager>>,
     exporter: Option<Exporter>,
     kube_controller: Option<KubeController>,
@@ -32,12 +39,159 @@ pub struct ServiceModeAgent {
     exporter_events: Option<mpsc::Receiver<ContainerEvent>>,
 }
 
+struct ServiceStatusReporter {
+    etcd_manager: Arc<EtcdManager>,
+    key: String,
+    cluster_name: String,
+    node_id: String,
+    deployment_version: String,
+}
+
+impl ServiceStatusReporter {
+    async fn new(
+        etcd_manager: Arc<EtcdManager>,
+        cluster_name: String,
+        node_id: String,
+        deployment_version: String,
+    ) -> Result<Self> {
+        let key = format!(
+            "/nokube/{}/service_agents/{}/deployments/{}",
+            cluster_name, node_id, deployment_version
+        );
+        let status = ServiceDeploymentStatus::new(
+            cluster_name.clone(),
+            node_id.clone(),
+            deployment_version.clone(),
+        );
+        let payload = serde_json::to_string(&status)?;
+        let created = etcd_manager
+            .compare_and_swap(&key, None, payload.clone())
+            .await?;
+
+        if !created {
+            let existing = etcd_manager.get(key.clone()).await?;
+            if let Some(kv) = existing.first() {
+                let current: ServiceDeploymentStatus = serde_json::from_str(kv.value_str())?;
+                if current.deployment_version != deployment_version {
+                    return Err(anyhow!(
+                        "Existing deployment status for node {} has mismatched version {}",
+                        node_id,
+                        current.deployment_version
+                    ));
+                }
+            } else {
+                // Key missing despite compare failure; overwrite directly.
+                etcd_manager.put(key.clone(), payload).await?;
+            }
+        }
+
+        Ok(Self {
+            etcd_manager,
+            key,
+            cluster_name,
+            node_id,
+            deployment_version,
+        })
+    }
+
+    async fn fetch_status(&self) -> Result<(ServiceDeploymentStatus, Option<i64>)> {
+        let kvs = self.etcd_manager.get(self.key.clone()).await?;
+        if let Some(kv) = kvs.into_iter().next() {
+            let status: ServiceDeploymentStatus = serde_json::from_str(kv.value_str())?;
+            Ok((status, Some(kv.mod_revision)))
+        } else {
+            let status = ServiceDeploymentStatus::new(
+                self.cluster_name.clone(),
+                self.node_id.clone(),
+                self.deployment_version.clone(),
+            );
+            Ok((status, None))
+        }
+    }
+
+    async fn update_status<F>(&self, mut update_fn: F) -> Result<()>
+    where
+        F: FnMut(&mut ServiceDeploymentStatus),
+    {
+        loop {
+            let (mut status, revision) = self.fetch_status().await?;
+            update_fn(&mut status);
+            status.updated_at = Utc::now().to_rfc3339();
+            let serialized = serde_json::to_string(&status)?;
+            if self
+                .etcd_manager
+                .compare_and_swap(&self.key, revision, serialized)
+                .await?
+            {
+                return Ok(());
+            }
+            sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    async fn mark_module_state(
+        &self,
+        module: &str,
+        state: ModuleState,
+        message: Option<String>,
+    ) -> Result<()> {
+        let timestamp = Utc::now().to_rfc3339();
+        let message_clone = message.clone();
+        let state_clone = state.clone();
+        self.update_status(|status| {
+            let entry = status
+                .modules
+                .entry(module.to_string())
+                .or_insert_with(|| super::status::ModuleStatus::new(ModuleState::Pending));
+            entry.state = state_clone.clone();
+            entry.message = message_clone.clone();
+            entry.updated_at = timestamp.clone();
+
+            match state_clone {
+                ModuleState::Failure => {
+                    status.overall_state = ModuleState::Failure;
+                }
+                ModuleState::Success => {
+                    if status.all_modules_success() {
+                        status.overall_state = ModuleState::Success;
+                    } else if status.overall_state != ModuleState::Failure {
+                        status.overall_state = ModuleState::InProgress;
+                    }
+                }
+                ModuleState::InProgress => {
+                    if status.overall_state != ModuleState::Failure {
+                        status.overall_state = ModuleState::InProgress;
+                    }
+                }
+                ModuleState::Pending => {}
+            }
+        })
+        .await
+    }
+
+    async fn mark_in_progress(&self, module: &str) -> Result<()> {
+        self.mark_module_state(module, ModuleState::InProgress, None)
+            .await
+    }
+
+    async fn mark_success(&self, module: &str, message: Option<String>) -> Result<()> {
+        self.mark_module_state(module, ModuleState::Success, message)
+            .await
+    }
+
+    async fn mark_failure(&self, module: &str, message: String) -> Result<()> {
+        self.mark_module_state(module, ModuleState::Failure, Some(message))
+            .await
+    }
+}
+
 impl ServiceModeAgent {
     pub async fn new(
         node_id: String,
         cluster_name: String,
         etcd_endpoints: Vec<String>,
         config: ClusterConfig,
+        deployment_version: String,
     ) -> Result<Self> {
         let etcd_manager = Arc::new(EtcdManager::new(etcd_endpoints).await?);
 
@@ -73,6 +227,7 @@ impl ServiceModeAgent {
             config,
             node_id,
             cluster_name,
+            deployment_version,
             etcd_manager: Some(etcd_manager),
             exporter: None,
             kube_controller: Some(kube_controller),
@@ -215,43 +370,151 @@ impl ServiceModeAgent {
         info!("Operating User: {}", current_user);
         info!("=====================================");
 
-        // 初始化日志收集器
-        if let Err(e) = self.initialize_log_collector().await {
-            warn!("Failed to initialize log collector: {}", e);
+        let status_reporter = if let Some(etcd_manager) = &self.etcd_manager {
+            Some(
+                ServiceStatusReporter::new(
+                    Arc::clone(etcd_manager),
+                    self.cluster_name.clone(),
+                    self.node_id.clone(),
+                    self.deployment_version.clone(),
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
+
+        if let Some(reporter) = &status_reporter {
+            reporter.mark_success("bootstrap", None).await?;
         }
 
-        // 启动TheProxy
-        if let Some(ref mut the_proxy) = self.the_proxy {
-            info!("Starting TheProxy...");
-            the_proxy.start().await?;
-            info!("TheProxy started successfully");
+        if let Some(reporter) = &status_reporter {
+            reporter.mark_in_progress("log_collector").await?;
+        }
+        match self.initialize_log_collector().await {
+            Ok(_) => {
+                if let Some(reporter) = &status_reporter {
+                    reporter.mark_success("log_collector", None).await?;
+                }
+            }
+            Err(e) => {
+                if let Some(reporter) = &status_reporter {
+                    reporter
+                        .mark_failure("log_collector", e.to_string())
+                        .await?;
+                }
+                return Err(e);
+            }
         }
 
-        // 启动KubeController
-        if let Some(ref mut kube_controller) = self.kube_controller {
-            info!("Starting KubeController...");
-            kube_controller.start().await?;
-            info!("KubeController started successfully");
+        if let Some(reporter) = &status_reporter {
+            reporter.mark_in_progress("the_proxy").await?;
+        }
+        match self.the_proxy.as_mut() {
+            Some(the_proxy) => {
+                info!("Starting TheProxy...");
+                if let Err(e) = the_proxy.start().await {
+                    if let Some(reporter) = &status_reporter {
+                        reporter.mark_failure("the_proxy", e.to_string()).await?;
+                    }
+                    return Err(e);
+                }
+                info!("TheProxy started successfully");
+                if let Some(reporter) = &status_reporter {
+                    reporter.mark_success("the_proxy", None).await?;
+                }
+            }
+            None => {
+                if let Some(reporter) = &status_reporter {
+                    reporter
+                        .mark_failure("the_proxy", "instance not initialized".to_string())
+                        .await?;
+                }
+                return Err(anyhow!("TheProxy instance not initialized"));
+            }
         }
 
-        // 启动时先进行一次本地容器与etcd状态的对账：
-        // - 清理不在etcd中的 nokube-pod-* 容器
-        // - 如容器带有校验标签且与 etcd 不一致，先回收，后续将按新配置重建
+        if let Some(reporter) = &status_reporter {
+            reporter.mark_in_progress("kube_controller").await?;
+        }
+        match self.kube_controller.as_mut() {
+            Some(kube_controller) => {
+                info!("Starting KubeController...");
+                if let Err(e) = kube_controller.start().await {
+                    if let Some(reporter) = &status_reporter {
+                        reporter
+                            .mark_failure("kube_controller", e.to_string())
+                            .await?;
+                    }
+                    return Err(e);
+                }
+                info!("KubeController started successfully");
+                if let Some(reporter) = &status_reporter {
+                    reporter.mark_success("kube_controller", None).await?;
+                }
+            }
+            None => {
+                if let Some(reporter) = &status_reporter {
+                    reporter
+                        .mark_failure("kube_controller", "instance not initialized".to_string())
+                        .await?;
+                }
+                return Err(anyhow!("KubeController instance not initialized"));
+            }
+        }
+
+        if let Some(reporter) = &status_reporter {
+            reporter.mark_in_progress("startup_reconcile").await?;
+        }
         if let Err(e) = self.startup_container_reconcile().await {
-            warn!("Startup container reconcile failed: {}", e);
+            if let Some(reporter) = &status_reporter {
+                reporter
+                    .mark_failure("startup_reconcile", e.to_string())
+                    .await?;
+            }
+            return Err(e);
+        }
+        if let Some(reporter) = &status_reporter {
+            reporter.mark_success("startup_reconcile", None).await?;
         }
 
-        // 从etcd加载k8sActor并应用到KubeController
-        self.load_and_apply_actor_registry().await?;
+        if let Some(reporter) = &status_reporter {
+            reporter.mark_in_progress("load_actors").await?;
+        }
+        if let Err(e) = self.load_and_apply_actor_registry().await {
+            if let Some(reporter) = &status_reporter {
+                reporter.mark_failure("load_actors", e.to_string()).await?;
+            }
+            return Err(e);
+        }
+        if let Some(reporter) = &status_reporter {
+            reporter.mark_success("load_actors", None).await?;
+        }
 
-        self.initialize_exporter().await?;
+        if let Some(reporter) = &status_reporter {
+            reporter.mark_in_progress("exporter").await?;
+        }
+        if let Err(e) = self.initialize_exporter().await {
+            if let Some(reporter) = &status_reporter {
+                reporter.mark_failure("exporter", e.to_string()).await?;
+            }
+            return Err(e);
+        }
         if let Some(exporter) = &self.exporter {
             let events = self.exporter_events.take();
-            exporter.start_with_etcd_polling(events).await?;
+            if let Err(e) = exporter.start_with_etcd_polling(events).await {
+                if let Some(reporter) = &status_reporter {
+                    reporter.mark_failure("exporter", e.to_string()).await?;
+                }
+                return Err(e);
+            }
+        }
+        if let Some(reporter) = &status_reporter {
+            reporter.mark_success("exporter", None).await?;
         }
 
         // 启动监控和服务子进程
-        self.start_services().await?;
+        self.start_services(status_reporter.as_ref()).await?;
 
         // 持续运行，等待关闭信号
         self.process_manager.wait_for_shutdown_signal().await;
@@ -359,93 +622,118 @@ impl ServiceModeAgent {
         Ok(())
     }
 
-    async fn start_services(&mut self) -> Result<()> {
+    async fn start_services(
+        &mut self,
+        status_reporter: Option<&ServiceStatusReporter>,
+    ) -> Result<()> {
         info!("Starting services in service mode");
 
-        // 启动监控相关服务
         if self.config.task_spec.monitoring.enabled {
-            self.start_monitoring_services().await?;
+            self.start_monitoring_services(status_reporter).await?;
+        } else if let Some(reporter) = status_reporter {
+            reporter
+                .mark_success(
+                    "grafana",
+                    Some("monitoring disabled in cluster config".to_string()),
+                )
+                .await?;
+            reporter
+                .mark_success(
+                    "metrics_collector",
+                    Some("monitoring disabled in cluster config".to_string()),
+                )
+                .await?;
         }
 
-        // 启动绑定的业务服务
-        self.start_bound_services().await?;
+        self.start_bound_services(status_reporter).await?;
 
         info!("All services started");
         Ok(())
     }
 
-    async fn start_monitoring_services(&mut self) -> Result<()> {
+    async fn start_monitoring_services(
+        &mut self,
+        status_reporter: Option<&ServiceStatusReporter>,
+    ) -> Result<()> {
         info!("Starting monitoring services");
 
         // 启动 Grafana 容器（作为子进程管理）
         if self.config.task_spec.monitoring.enabled {
-            // 解析 workspace（优先 head 节点 workspace）
-            let workspace = if let Some(head_node) = self
+            let head_node = self
                 .config
                 .nodes
                 .iter()
-                .find(|n| matches!(n.role, crate::config::cluster_config::NodeRole::Head))
-            {
-                head_node
-                    .workspace
-                    .clone()
-                    .unwrap_or("/opt/devcon/pa/nokube-workspace".to_string())
-            } else {
-                "/opt/devcon/pa/nokube-workspace".to_string()
-            };
-            let config_dir = format!("{}/config", workspace);
-            let ds_dir = format!("{}/provisioning/datasources", config_dir);
-            let dash_dir = format!("{}/provisioning/dashboards", config_dir);
-            let grafana_ini = format!("{}/grafana.ini", config_dir);
+                .find(|n| matches!(n.role, crate::config::cluster_config::NodeRole::Head));
 
-            // 确保目录存在（容器重启后可用）
-            let _ = std::fs::create_dir_all(&ds_dir);
-            let _ = std::fs::create_dir_all(&dash_dir);
-            if std::fs::metadata(&grafana_ini).is_err() {
-                let default_ini = "[server]\nhttp_port = 3000\n\n[security]\nadmin_user = admin\nadmin_password = admin\n\n[auth.anonymous]\nenabled = true\norg_role = Viewer\n";
-                let _ = std::fs::create_dir_all(&config_dir);
-                let _ = std::fs::write(&grafana_ini, default_ini);
-            }
-
-            // 如缺失，则写入数据源与仪表盘 provisioning
-            let ds_yaml_path = format!("{}/nokube-datasource.yaml", ds_dir);
-            if std::fs::metadata(&ds_yaml_path).is_err() {
-                let head_ip = if let Some(head_node) = self
-                    .config
-                    .nodes
-                    .iter()
-                    .find(|n| matches!(n.role, crate::config::cluster_config::NodeRole::Head))
-                {
-                    head_node.get_ip().unwrap_or("127.0.0.1")
-                } else {
-                    "127.0.0.1"
-                };
-                let greptime_port = self.config.task_spec.monitoring.greptimedb.port;
-                let mysql_port = greptime_port + 2;
-                // 约定优于配置：仅使用集群配置中的凭证，或默认 root/无口令
-                let mysql_user = self
-                    .config
-                    .task_spec
-                    .monitoring
-                    .greptimedb
-                    .mysql_user
-                    .clone()
-                    .unwrap_or_else(|| "root".to_string());
-                let mysql_pass = self
-                    .config
-                    .task_spec
-                    .monitoring
-                    .greptimedb
-                    .mysql_password
-                    .clone();
-                let secure_block = match mysql_pass {
-                    Some(ref p) if !p.is_empty() => {
-                        format!("\n  secureJsonData:\n    password: {}\n", p)
+            match head_node {
+                Some(head_node) if head_node.name == self.node_id => {
+                    if let Some(reporter) = status_reporter {
+                        reporter.mark_in_progress("grafana").await?;
                     }
-                    _ => String::new(),
-                };
-                let ds_yaml = format!(
-                    r#"apiVersion: 1
+                    let workspace = head_node
+                        .workspace
+                        .clone()
+                        .unwrap_or("/opt/devcon/pa/nokube-workspace".to_string());
+                    let config_dir = format!("{}/config", workspace);
+                    let data_dir = format!("{}/data/grafana", workspace);
+                    let ds_dir = format!("{}/provisioning/datasources", config_dir);
+                    let dash_dir = format!("{}/provisioning/dashboards", config_dir);
+                    let grafana_ini = format!("{}/grafana.ini", config_dir);
+
+                    let _ = std::fs::create_dir_all(&ds_dir);
+                    let _ = std::fs::create_dir_all(&dash_dir);
+                    let _ = std::fs::create_dir_all(&data_dir);
+                    if std::fs::metadata(&grafana_ini).is_err() {
+                        let default_ini = "[server]
+http_port = 3000
+
+[security]
+admin_user = admin
+admin_password = admin
+
+[auth.anonymous]
+enabled = true
+org_role = Viewer
+";
+                        let _ = std::fs::create_dir_all(&config_dir);
+                        let _ = std::fs::write(&grafana_ini, default_ini);
+                    }
+
+                    let head_ip = head_node.get_ip().unwrap_or("127.0.0.1").to_string();
+                    let grafana_port = self.config.task_spec.monitoring.grafana.port;
+                    let greptime_port = self.config.task_spec.monitoring.greptimedb.port;
+                    let mysql_port = greptime_port + 2;
+                    let mysql_user = self
+                        .config
+                        .task_spec
+                        .monitoring
+                        .greptimedb
+                        .mysql_user
+                        .clone()
+                        .unwrap_or_else(|| "root".to_string());
+                    let mysql_pass = self
+                        .config
+                        .task_spec
+                        .monitoring
+                        .greptimedb
+                        .mysql_password
+                        .clone();
+                    let secure_block = match mysql_pass {
+                        Some(ref p) if !p.is_empty() => {
+                            format!(
+                                "
+  secureJsonData:
+    password: {}
+",
+                                p
+                            )
+                        }
+                        _ => String::new(),
+                    };
+
+                    let ds_yaml_path = format!("{}/nokube-datasource.yaml", ds_dir);
+                    let ds_yaml = format!(
+                        r#"apiVersion: 1
 datasources:
   - name: GreptimeDB
     type: prometheus
@@ -473,18 +761,16 @@ datasources:
     jsonData:
       timeInterval: 1s{secure}
 "#,
-                    head = head_ip,
-                    port = greptime_port,
-                    mysql_port = mysql_port,
-                    mysql_user = mysql_user,
-                    secure = secure_block
-                );
-                let _ = std::fs::write(&ds_yaml_path, ds_yaml);
-            }
+                        head = head_ip.as_str(),
+                        port = greptime_port,
+                        mysql_port = mysql_port,
+                        mysql_user = mysql_user,
+                        secure = secure_block
+                    );
+                    let _ = std::fs::write(&ds_yaml_path, ds_yaml);
 
-            let provider_yaml_path = format!("{}/nokube-provider.yaml", dash_dir);
-            if std::fs::metadata(&provider_yaml_path).is_err() {
-                let provider_yaml = r#"apiVersion: 1
+                    let provider_yaml_path = format!("{}/nokube-provider.yaml", dash_dir);
+                    let provider_yaml = r#"apiVersion: 1
 providers:
   - name: 'nokube'
     orgId: 1
@@ -496,104 +782,183 @@ providers:
       path: /etc/grafana/provisioning/dashboards/nokube
       foldersFromFilesStructure: true
 "#;
-                let _ = std::fs::write(&provider_yaml_path, provider_yaml);
-            }
-            let dash_nokube_dir = format!("{}/nokube", dash_dir);
-            let _ = std::fs::create_dir_all(&dash_nokube_dir);
-            // Write a simple Home dashboard with useful links
-            let head_ip = if let Some(head_node) = self
-                .config
-                .nodes
-                .iter()
-                .find(|n| matches!(n.role, crate::config::cluster_config::NodeRole::Head))
-            {
-                head_node.get_ip().unwrap_or("127.0.0.1")
-            } else {
-                "127.0.0.1"
-            };
-            let grafana_port = self.config.task_spec.monitoring.grafana.port;
-            let greptime_port = self.config.task_spec.monitoring.greptimedb.port;
-            let http_link = format!(
-                "http://{}:{}",
-                head_ip, self.config.task_spec.monitoring.httpserver.port
-            );
-            let home_markdown = format!(
-                "# NoKube Links\\n\\n- GreptimeDB HTTP: [http://{head}:{gport}](http://{head}:{gport})\\n- Grafana: [http://{head}:{gfport}](http://{head}:{gfport})\\n- HTTP Server: [{http}]({http})",
-                head=head_ip, gfport=grafana_port, gport=greptime_port, http=http_link
-            );
-            let home_dash_json_path = format!("{}/nokube-home.json", dash_nokube_dir);
-            let home_dash = serde_json::json!({
-                "id": null,
-                "uid": "nokube-home",
-                "title": "NoKube Home",
-                "tags": ["nokube", "home", "links"],
-                "timezone": "browser",
-                "panels": [
-                    {"id": 1, "title": "Links", "type": "text",
-                     "gridPos": {"h": 6, "w": 24, "x": 0, "y": 0},
-                     "options": {"mode": "markdown", "content": home_markdown}
+                    let _ = std::fs::write(&provider_yaml_path, provider_yaml);
+
+                    let dash_nokube_dir = format!("{}/nokube", dash_dir);
+                    let _ = std::fs::create_dir_all(&dash_nokube_dir);
+                    let http_link = format!(
+                        "http://{}:{}",
+                        head_ip, self.config.task_spec.monitoring.httpserver.port
+                    );
+                    let home_markdown = format!(
+                        "# NoKube Links
+
+- GreptimeDB HTTP: [http://{head}:{gport}](http://{head}:{gport})
+- Grafana: [http://{head}:{gfport}](http://{head}:{gfport})
+- HTTP Server: [{http}]({http})",
+                        head = head_ip.as_str(),
+                        gfport = grafana_port,
+                        gport = greptime_port,
+                        http = http_link
+                    );
+                    let home_dash_json_path = format!("{}/nokube-home.json", dash_nokube_dir);
+                    let home_dash = serde_json::json!({
+                        "id": null,
+                        "uid": "nokube-home",
+                        "title": "NoKube Home",
+                        "tags": ["nokube", "home", "links"],
+                        "timezone": "browser",
+                        "panels": [
+                            {"id": 1, "title": "Links", "type": "text",
+                             "gridPos": {"h": 6, "w": 24, "x": 0, "y": 0},
+                             "options": {"mode": "markdown", "content": home_markdown}
+                            }
+                        ],
+                        "time": {"from": "now-1h", "to": "now"},
+                        "refresh": "",
+                        "schemaVersion": 16,
+                        "version": 0
+                    });
+                    let _ = std::fs::write(
+                        &home_dash_json_path,
+                        serde_json::to_string_pretty(&home_dash).unwrap_or_else(|_| String::new()),
+                    );
+                    let mysql_dash_json = format!("{}/nokube-logs-mysql.json", dash_nokube_dir);
+                    let dash_json = serde_json::json!({
+                            "id": null,
+                            "uid": "nokube-logs-mysql",
+                            "title": "NoKube Logs (MySQL)",
+                            "tags": ["nokube", "logs", "mysql", "greptimedb"],
+                            "timezone": "browser",
+                            "panels": [
+                                {"id": 1, "title": "Log Messages (Latest)", "type": "logs", "datasource": "greptimemysql",
+                                 "targets": [{"format":"table","rawSql":"SELECT timestamp AS time, body AS message, severity_text AS level FROM opentelemetry_logs WHERE $__timeFilter(timestamp) AND (COALESCE(${fullpath:sqlstring}, ${container_path:sqlstring}) = '' OR scope_name = COALESCE(${fullpath:sqlstring}, ${container_path:sqlstring})) ORDER BY timestamp DESC LIMIT 1000"}],
+                                 "options": {"showTime": true, "showLabels": false, "showCommonLabels": false, "wrapLogMessage": false, "enableLogDetails": false, "messageField": "message"},
+                                 "gridPos": {"h": 12, "w": 24, "x": 0, "y": 0}},
+                                {"id": 2, "title": "Log Level Distribution", "type": "piechart", "datasource": "greptimemysql",
+                                 "targets": [{"format":"table","rawSql":"SELECT severity_text AS metric, COUNT(*) AS value FROM opentelemetry_logs WHERE $__timeFilter(timestamp) AND (COALESCE(${fullpath:sqlstring}, ${container_path:sqlstring}) = '' OR scope_name = COALESCE(${fullpath:sqlstring}, ${container_path:sqlstring})) GROUP BY severity_text"}],
+                                 "gridPos": {"h": 6, "w": 8, "x": 0, "y": 12}},
+                                {"id": 3, "title": "Logs per Minute", "type": "timeseries", "datasource": "greptimemysql",
+                                 "targets": [{"format":"time_series","rawSql":"SELECT $__timeGroup(timestamp, '1m') AS time, 'All Logs' AS metric, COUNT(*) AS value FROM opentelemetry_logs WHERE $__timeFilter(timestamp) AND (COALESCE(${fullpath:sqlstring}, ${container_path:sqlstring}) = '' OR scope_name = COALESCE(${fullpath:sqlstring}, ${container_path:sqlstring})) GROUP BY 1 ORDER BY 1"}],
+                                 "gridPos": {"h": 6, "w": 16, "x": 8, "y": 12}}
+                            ],
+                            "templating": {"list": [
+                                {"name": "fullpath", "type": "query", "datasource": "greptimemysql", "query": "SELECT DISTINCT scope_name AS text, scope_name AS value FROM opentelemetry_logs WHERE scope_name <> '' ORDER BY text", "refresh": 1, "includeAll": true, "allValue": "", "multi": false, "current": {"text": "All", "value": "$__all"}},
+                                {"name": "container_path", "type": "query", "datasource": "greptimemysql", "query": "SELECT DISTINCT scope_name AS text, scope_name AS value FROM opentelemetry_logs WHERE scope_name <> '' ORDER BY text", "refresh": 1, "includeAll": true, "allValue": "", "multi": false, "current": {"text": "", "value": ""}, "hide": 2}
+                            ]},
+                            "time": {"from": "now-6h", "to": "now"},
+                            "refresh": "30s",
+                            "schemaVersion": 30,
+                            "version": 1
+                    });
+                    let _ = std::fs::write(
+                        &mysql_dash_json,
+                        serde_json::to_string_pretty(&dash_json).unwrap_or_default(),
+                    );
+
+                    let grafana_args = vec![
+                        "-p".to_string(),
+                        format!("{}:3000", grafana_port),
+                        "-v".to_string(),
+                        format!("{}:/etc/grafana/grafana.ini", grafana_ini),
+                        "-v".to_string(),
+                        format!("{}:/etc/grafana/provisioning/datasources", ds_dir),
+                        "-v".to_string(),
+                        format!("{}:/etc/grafana/provisioning/dashboards", dash_dir),
+                        "-v".to_string(),
+                        format!("{}:/var/lib/grafana", data_dir),
+                    ];
+
+                    if let Err(e) = self.process_manager.spawn_docker_container(
+                        "nokube-grafana".to_string(),
+                        "greptime/grafana-greptimedb:latest".to_string(),
+                        grafana_args,
+                        None,
+                    ) {
+                        if let Some(reporter) = status_reporter {
+                            reporter.mark_failure("grafana", e.to_string()).await?;
+                        }
+                        return Err(e);
                     }
-                ],
-                "time": {"from": "now-1h", "to": "now"},
-                "refresh": "",
-                "schemaVersion": 16,
-                "version": 0
-            });
-            let _ = std::fs::write(
-                &home_dash_json_path,
-                serde_json::to_string_pretty(&home_dash).unwrap_or_else(|_| String::new()),
-            );
-            let mysql_dash_json = format!("{}/nokube-logs-mysql.json", dash_nokube_dir);
-            // Always write dashboard JSON to ensure layout and queries are updated
-            let dash_json = serde_json::json!({
-                    "id": null,
-                    "uid": "nokube-logs-mysql",
-                    "title": "NoKube Logs (MySQL)",
-                    "tags": ["nokube", "logs", "mysql", "greptimedb"],
-                    "timezone": "browser",
-                    "panels": [
-                        {"id": 1, "title": "Log Messages (Latest)", "type": "logs", "datasource": "greptimemysql",
-                         "targets": [{"format":"table","rawSql":"SELECT timestamp AS time, body AS message, severity_text AS level FROM opentelemetry_logs WHERE $__timeFilter(timestamp) AND (COALESCE(${fullpath:sqlstring}, ${container_path:sqlstring}) = '' OR scope_name = COALESCE(${fullpath:sqlstring}, ${container_path:sqlstring})) ORDER BY timestamp DESC LIMIT 1000"}],
-                         "options": {"showTime": true, "showLabels": false, "showCommonLabels": false, "wrapLogMessage": false, "enableLogDetails": false, "messageField": "message"},
-                         "gridPos": {"h": 12, "w": 24, "x": 0, "y": 0}},
-                        {"id": 2, "title": "Log Level Distribution", "type": "piechart", "datasource": "greptimemysql",
-                         "targets": [{"format":"table","rawSql":"SELECT severity_text AS metric, COUNT(*) AS value FROM opentelemetry_logs WHERE $__timeFilter(timestamp) AND (COALESCE(${fullpath:sqlstring}, ${container_path:sqlstring}) = '' OR scope_name = COALESCE(${fullpath:sqlstring}, ${container_path:sqlstring})) GROUP BY severity_text"}],
-                         "gridPos": {"h": 6, "w": 8, "x": 0, "y": 12}},
-                        {"id": 3, "title": "Logs per Minute", "type": "timeseries", "datasource": "greptimemysql",
-                         "targets": [{"format":"time_series","rawSql":"SELECT $__timeGroup(timestamp, '1m') AS time, 'All Logs' AS metric, COUNT(*) AS value FROM opentelemetry_logs WHERE $__timeFilter(timestamp) AND (COALESCE(${fullpath:sqlstring}, ${container_path:sqlstring}) = '' OR scope_name = COALESCE(${fullpath:sqlstring}, ${container_path:sqlstring})) GROUP BY 1 ORDER BY 1"}],
-                         "gridPos": {"h": 6, "w": 16, "x": 8, "y": 12}}
-                    ],
-                    "templating": {"list": [
-                        {"name": "fullpath", "type": "query", "datasource": "greptimemysql", "query": "SELECT DISTINCT scope_name AS text, scope_name AS value FROM opentelemetry_logs WHERE scope_name <> '' ORDER BY text", "refresh": 1, "includeAll": true, "allValue": "", "multi": false, "current": {"text": "All", "value": "$__all"}},
-                        {"name": "container_path", "type": "query", "datasource": "greptimemysql", "query": "SELECT DISTINCT scope_name AS text, scope_name AS value FROM opentelemetry_logs WHERE scope_name <> '' ORDER BY text", "refresh": 1, "includeAll": true, "allValue": "", "multi": false, "current": {"text": "", "value": ""}, "hide": 2}
-                    ]},
-                    "time": {"from": "now-6h", "to": "now"},
-                    "refresh": "30s",
-                    "schemaVersion": 30,
-                    "version": 1
-            });
-            let _ = std::fs::write(
-                &mysql_dash_json,
-                serde_json::to_string_pretty(&dash_json).unwrap_or_default(),
-            );
 
-            let grafana_args = vec![
-                "-p".to_string(),
-                format!("{}:3000", self.config.task_spec.monitoring.grafana.port),
-                "-v".to_string(),
-                format!("{}:/etc/grafana/grafana.ini", grafana_ini),
-                "-v".to_string(),
-                format!("{}:/etc/grafana/provisioning/datasources", ds_dir),
-                "-v".to_string(),
-                format!("{}:/etc/grafana/provisioning/dashboards", dash_dir),
-            ];
+                    if let Err(e) = self.ensure_grafana_ready(&head_ip, grafana_port).await {
+                        if let Some(reporter) = status_reporter {
+                            reporter.mark_failure("grafana", e.to_string()).await?;
+                        }
+                        return Err(e);
+                    }
 
-            self.process_manager.spawn_docker_container(
-                "nokube-grafana".to_string(),
-                "greptime/grafana-greptimedb:latest".to_string(),
-                grafana_args,
-                None, // Grafana容器没有自定义启动命令
-            )?;
+                    if let Err(e) = self
+                        .update_grafana_preferences(&head_ip, grafana_port)
+                        .await
+                    {
+                        if let Some(reporter) = status_reporter {
+                            reporter.mark_failure("grafana", e.to_string()).await?;
+                        }
+                        return Err(e);
+                    }
+
+                    // Ensure default dashboards (cluster & actor) are imported via Grafana HTTP API
+                    let grafana_manager = GrafanaManager::new(
+                        grafana_port,
+                        format!("http://{}:{}", head_ip, greptime_port),
+                        workspace.clone(),
+                        head_ip.clone(),
+                    );
+
+                    if let Err(e) = grafana_manager.import_cluster_dashboard().await {
+                        if let Some(reporter) = status_reporter {
+                            reporter.mark_failure("grafana", e.to_string()).await?;
+                        }
+                        return Err(e);
+                    }
+
+                    if let Err(e) = grafana_manager.import_actor_dashboard().await {
+                        if let Some(reporter) = status_reporter {
+                            reporter.mark_failure("grafana", e.to_string()).await?;
+                        }
+                        return Err(e);
+                    }
+
+                    if let Some(reporter) = status_reporter {
+                        reporter.mark_success("grafana", None).await?;
+                    }
+                }
+                Some(_) => {
+                    if let Some(reporter) = status_reporter {
+                        reporter
+                            .mark_success("grafana", Some("skipped on non-head node".to_string()))
+                            .await?;
+                        reporter
+                            .mark_success(
+                                "metrics_collector",
+                                Some("skipped on non-head node".to_string()),
+                            )
+                            .await?;
+                    }
+                    info!(
+                        "Monitoring enabled but Grafana setup only runs on head node (current node: {})",
+                        self.node_id
+                    );
+                }
+                None => {
+                    if let Some(reporter) = status_reporter {
+                        reporter
+                            .mark_failure(
+                                "grafana",
+                                "head node not found in cluster config".to_string(),
+                            )
+                            .await?;
+                        reporter
+                            .mark_failure(
+                                "metrics_collector",
+                                "head node not found in cluster config".to_string(),
+                            )
+                            .await?;
+                    }
+                    warn!("Monitoring enabled but no head node found; skipping Grafana setup");
+                }
+            }
         }
 
         // 启动增强的指标收集进程 - 包含k8sActor指标，并推送到GreptimeDB
@@ -617,6 +982,10 @@ providers:
         } else {
             ("localhost".to_string(), 4000)
         };
+
+        if let Some(reporter) = status_reporter {
+            reporter.mark_in_progress("metrics_collector").await?;
+        }
 
         let mut metrics_command = Command::new("python3");
         metrics_command.args(&["-c", &format!(r#"
@@ -1019,14 +1388,161 @@ if __name__ == "__main__":
     main()
 "#, self.node_id, self.cluster_name, format!("http://{}:{}", greptime_host, greptime_http_port))]);
 
-        self.process_manager
-            .spawn_process("metrics-collector".to_string(), metrics_command)?;
+        if let Err(e) = self
+            .process_manager
+            .spawn_process("metrics-collector".to_string(), metrics_command)
+        {
+            if let Some(reporter) = status_reporter {
+                reporter
+                    .mark_failure("metrics_collector", e.to_string())
+                    .await?;
+            }
+            return Err(e);
+        }
+
+        if let Some(reporter) = status_reporter {
+            reporter.mark_success("metrics_collector", None).await?;
+        }
 
         info!("Enhanced monitoring services started with k8s metrics collection");
         Ok(())
     }
 
-    async fn start_bound_services(&mut self) -> Result<()> {
+    async fn ensure_grafana_ready(&self, host: &str, port: u16) -> Result<()> {
+        const READY_TIMEOUT: Duration = Duration::from_secs(600);
+        const POLL_INTERVAL: Duration = Duration::from_secs(2);
+
+        let client = Client::builder()
+            .no_proxy()
+            .build()
+            .map_err(|e| anyhow!("Failed to build Grafana HTTP client: {}", e))?;
+
+        let health_url = format!("http://{}:{}/api/health", host, port);
+        let start = Instant::now();
+        let mut attempt: u32 = 0;
+        let mut last_status: Option<u16> = None;
+        let mut last_error: Option<String> = None;
+
+        loop {
+            attempt += 1;
+            match client.get(&health_url).send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    info!(
+                        "Grafana API ready at {}:{} after {} attempts (elapsed {:?})",
+                        host,
+                        port,
+                        attempt,
+                        start.elapsed()
+                    );
+                    return Ok(());
+                }
+                Ok(resp) => {
+                    last_status = Some(resp.status().as_u16());
+                    if attempt % 30 == 0 {
+                        info!(
+                            "Waiting for Grafana API at {}:{} (status={}, attempts={}, elapsed={:?})",
+                            host,
+                            port,
+                            resp.status().as_u16(),
+                            attempt,
+                            start.elapsed()
+                        );
+                    }
+                }
+                Err(err) => {
+                    last_error = Some(err.to_string());
+                    if attempt % 30 == 0 {
+                        warn!(
+                            "Error reaching Grafana API at {}:{} (attempts={}, elapsed={:?}): {}",
+                            host,
+                            port,
+                            attempt,
+                            start.elapsed(),
+                            last_error.as_deref().unwrap_or_default()
+                        );
+                    }
+                }
+            }
+
+            if start.elapsed() >= READY_TIMEOUT {
+                break;
+            }
+
+            sleep(POLL_INTERVAL).await;
+        }
+
+        let detail = match (last_status, last_error) {
+            (Some(status), _) => format!("last HTTP status {}", status),
+            (None, Some(err)) => format!("last error {}", err),
+            _ => "no response received".to_string(),
+        };
+
+        Err(anyhow!(
+            "Grafana API did not become ready at {}:{} within {:?} ({})",
+            host,
+            port,
+            READY_TIMEOUT,
+            detail
+        ))
+    }
+
+    async fn update_grafana_preferences(&self, host: &str, port: u16) -> Result<()> {
+        let client = Client::builder()
+            .no_proxy()
+            .build()
+            .map_err(|e| anyhow!("Failed to build Grafana HTTP client: {}", e))?;
+
+        let grafana_user = self
+            .config
+            .task_spec
+            .monitoring
+            .grafana
+            .admin_user
+            .clone()
+            .unwrap_or_else(|| "admin".to_string());
+        let grafana_pass = self
+            .config
+            .task_spec
+            .monitoring
+            .grafana
+            .admin_password
+            .clone()
+            .unwrap_or_else(|| "admin".to_string());
+
+        let url = format!("http://{}:{}/api/org/preferences", host, port);
+        let payload = serde_json::json!({
+            "homeDashboardUID": "nokube-home",
+            "theme": "",
+        });
+
+        let response = client
+            .put(&url)
+            .basic_auth(&grafana_user, Some(&grafana_pass))
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|e| anyhow!("Failed to update Grafana preferences: {}", e))?;
+
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            let status = response.status();
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "<unavailable>".to_string());
+            Err(anyhow!(
+                "Grafana preferences update failed: status={} body={}",
+                status,
+                body
+            ))
+        }
+    }
+
+    async fn start_bound_services(
+        &mut self,
+        status_reporter: Option<&ServiceStatusReporter>,
+    ) -> Result<()> {
         info!("Starting bound services");
         // HTTP file server (head node only, always enabled)
         let http_port = self.config.task_spec.monitoring.httpserver.port;
@@ -1064,7 +1580,10 @@ if __name__ == "__main__":
                         "--directory".to_string(),
                         "/srv/http".to_string(),
                     ]);
-                // Try to run
+                if let Some(reporter) = status_reporter {
+                    reporter.mark_in_progress("bound_services").await?;
+                }
+
                 match DockerRunner::run(&run) {
                     Ok(id) => {
                         info!("Started HTTP server '{}' (container id: {}), serving {} on /srv/http, port {}->8080", container_name, id, host_dir, http_port);
@@ -1074,12 +1593,17 @@ if __name__ == "__main__":
                             head.get_ip().unwrap_or("127.0.0.1"),
                             http_port
                         );
+                        if let Some(reporter) = status_reporter {
+                            reporter.mark_success("bound_services", None).await?;
+                        }
                     }
                     Err(e) => {
-                        warn!(
-                            "Failed to start HTTP server container '{}': {}",
-                            container_name, e
-                        );
+                        if let Some(reporter) = status_reporter {
+                            reporter
+                                .mark_failure("bound_services", e.to_string())
+                                .await?;
+                        }
+                        return Err(e);
                     }
                 }
             } else {
@@ -1087,7 +1611,22 @@ if __name__ == "__main__":
                     "HTTP server runs only on head node: {} (current={})",
                     head_name, self.node_id
                 );
+                if let Some(reporter) = status_reporter {
+                    reporter
+                        .mark_success(
+                            "bound_services",
+                            Some("skipped on non-head node".to_string()),
+                        )
+                        .await?;
+                }
             }
+        } else if let Some(reporter) = status_reporter {
+            reporter
+                .mark_failure(
+                    "bound_services",
+                    "head node not found in cluster config".to_string(),
+                )
+                .await?;
         }
 
         info!("Bound services started");

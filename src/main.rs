@@ -90,8 +90,16 @@ use clap::{Parser, Subcommand};
 use serde::Deserialize;
 use std::fs;
 use std::io::Read;
+use std::time::Duration;
+use tokio::time::sleep;
 use tracing::{error, info};
 use tracing_subscriber::{self, EnvFilter};
+use uuid::Uuid;
+
+use crate::agent::service_agent::status::{
+    ModuleState, ServiceDeploymentStatus, SERVICE_AGENT_MODULES,
+};
+use chrono::Utc;
 
 mod agent;
 mod config;
@@ -213,114 +221,198 @@ async fn main() -> Result<()> {
         );
         info!("Place artifacts on head at: {}", releases_dir);
         info!("Nodes will download from: {}", http_base);
-        match DeploymentController::new().await {
-            Ok(mut deployment_controller) => {
-                let config_manager_result = ConfigManager::new().await;
-                match config_manager_result {
-                    Ok(config_manager) => {
-                        if let Err(e) = config_manager.update_cluster_config(&cluster_config).await
-                        {
-                            error!("Failed to store cluster config: {}", e);
-                            return Err(NokubeError::Config(format!(
-                                "Config storage failed: {}",
-                                e
+        let deployment_version =
+            format!("{}-{}", Utc::now().format("%Y%m%d%H%M%S"), Uuid::new_v4());
+        info!(
+            "Generated deployment version for this rollout: {}",
+            deployment_version
+        );
+
+        let config_manager = ConfigManager::new().await.map_err(|e| {
+            error!("Failed to create config manager: {}", e);
+            NokubeError::Config(format!("Config manager creation failed: {}", e))
+        })?;
+
+        if let Err(e) = config_manager.update_cluster_config(&cluster_config).await {
+            error!("Failed to store cluster config: {}", e);
+            return Err(NokubeError::Config(format!("Config storage failed: {}", e)));
+        }
+
+        if let Err(e) = config_manager.init_cluster(&cluster_name).await {
+            error!("Failed to store cluster meta: {}", e);
+        }
+
+        let mut deployment_controller = DeploymentController::new().await.map_err(|e| {
+            error!("Failed to create deployment controller: {}", e);
+            NokubeError::Deployment(format!("Controller creation failed: {}", e))
+        })?;
+
+        deployment_controller
+            .deploy_or_update(&cluster_name, &deployment_version)
+            .await
+            .map_err(|e| {
+                error!("Failed to deploy/update cluster {}: {}", cluster_name, e);
+                NokubeError::Deployment(format!("Deployment failed: {}", e))
+            })?;
+
+        info!("Cluster {} deployed/updated successfully", cluster_name);
+        info!(
+            "Grafana provisioning is now handled by service agents; no command-mode Grafana tasks executed."
+        );
+
+        wait_for_service_agents_ready(
+            &config_manager,
+            &cluster_config,
+            &cluster_name,
+            &deployment_version,
+        )
+        .await?;
+
+        Ok(())
+    }
+
+    async fn wait_for_service_agents_ready(
+        config_manager: &ConfigManager,
+        cluster_config: &ClusterConfig,
+        cluster_name: &str,
+        deployment_version: &str,
+    ) -> Result<()> {
+        const WAIT_TIMEOUT: Duration = Duration::from_secs(600);
+        const POLL_INTERVAL: Duration = Duration::from_secs(2);
+
+        info!(
+            "Waiting for service agents to report module readiness (deployment_version={})",
+            deployment_version
+        );
+
+        let etcd = config_manager.get_etcd_manager();
+        let start = std::time::Instant::now();
+
+        loop {
+            let mut all_ready = true;
+            let mut iteration_summaries: Vec<String> = Vec::new();
+
+            for node in &cluster_config.nodes {
+                let key = format!(
+                    "/nokube/{}/service_agents/{}/deployments/{}",
+                    cluster_name, node.name, deployment_version
+                );
+
+                let kvs = etcd.get(key.clone()).await?;
+                if kvs.is_empty() {
+                    all_ready = false;
+                    iteration_summaries.push(format!("node={} status=waiting", node.name));
+                    continue;
+                }
+
+                let kv = &kvs[0];
+                let status: ServiceDeploymentStatus = serde_json::from_str(kv.value_str())
+                    .map_err(|e| {
+                        NokubeError::Deployment(format!(
+                            "Failed to parse service agent status for node {}: {}",
+                            node.name, e
+                        ))
+                    })?;
+
+                if status.deployment_version != deployment_version {
+                    all_ready = false;
+                    iteration_summaries.push(format!(
+                        "node={} status=stale_version current={}",
+                        node.name, status.deployment_version
+                    ));
+                    continue;
+                }
+
+                if status.overall_state == ModuleState::Failure {
+                    let detail = status
+                        .modules
+                        .values()
+                        .filter(|entry| entry.state == ModuleState::Failure)
+                        .map(|entry| entry.message.clone().unwrap_or_default())
+                        .collect::<Vec<_>>()
+                        .join("; ");
+                    error!(
+                        "Service agent on node {} reported failure while waiting: {}",
+                        node.name,
+                        if detail.is_empty() {
+                            "unknown error".to_string()
+                        } else {
+                            detail.clone()
+                        }
+                    );
+                    return Err(NokubeError::Deployment(format!(
+                        "Service agent on node {} reported failure: {}",
+                        node.name,
+                        if detail.is_empty() {
+                            "unknown error".to_string()
+                        } else {
+                            detail
+                        }
+                    )));
+                }
+
+                for module in SERVICE_AGENT_MODULES {
+                    let entry = status.modules.get(*module);
+                    match entry.map(|m| &m.state) {
+                        Some(ModuleState::Success) => {}
+                        Some(ModuleState::Failure) => {
+                            let message = entry
+                                .and_then(|m| m.message.clone())
+                                .unwrap_or_else(|| "unknown error".to_string());
+                            error!(
+                                "Service agent module '{}' failed on node {}: {}",
+                                module, node.name, message
+                            );
+                            return Err(NokubeError::Deployment(format!(
+                                "Service agent module '{}' failed on node {}: {}",
+                                module, node.name, message
                             )));
                         }
-                        if let Err(e) = config_manager.init_cluster(&cluster_name).await {
-                            error!("Failed to store cluster meta: {}", e);
+                        _ => {
+                            all_ready = false;
                         }
                     }
-                    Err(e) => {
-                        error!("Failed to create config manager: {}", e);
-                        return Err(NokubeError::Config(format!(
-                            "Config manager creation failed: {}",
-                            e
-                        )));
-                    }
                 }
-                match deployment_controller.deploy_or_update(&cluster_name).await {
-                    Ok(_) => {
-                        info!("Cluster {} deployed/updated successfully", cluster_name);
-                        // Post-update hook: restart agent (handled in deploy_or_update) and re-import Grafana dashboards
-                        info!(
-                            "Re-importing Grafana dashboards for cluster: {}",
-                            cluster_name
-                        );
-                        // Build rich params so CommandModeAgent can fully configure Grafana & Greptime
-                        // Resolve head node info
-                        let head_node = cluster_config.nodes.iter().find(|n| {
-                            matches!(n.role, crate::config::cluster_config::NodeRole::Head)
-                        });
-                        let (node_ip, workspace) = if let Some(n) = head_node {
-                            let host_part = n.ssh_url.split('@').last().unwrap_or("localhost");
-                            let host = if host_part.contains(':') {
-                                host_part.split(':').next().unwrap_or("localhost")
-                            } else {
-                                host_part
-                            };
-                            let ws = n.workspace.clone().unwrap_or("/opt/nokube".to_string());
-                            (host.to_string(), ws)
-                        } else {
-                            ("127.0.0.1".to_string(), "/opt/nokube".to_string())
-                        };
 
-                        let grafana_port = cluster_config.task_spec.monitoring.grafana.port;
-                        let greptimedb_port = cluster_config.task_spec.monitoring.greptimedb.port;
-
-                        // Provide a minimal grafana.ini so container can start (use configured admin creds if present)
-                        let g_user = cluster_config
-                            .task_spec
-                            .monitoring
-                            .grafana
-                            .admin_user
-                            .clone()
-                            .unwrap_or_else(|| "admin".to_string());
-                        let g_pass = cluster_config
-                            .task_spec
-                            .monitoring
-                            .grafana
-                            .admin_password
-                            .clone()
-                            .unwrap_or_else(|| "admin".to_string());
-                        let grafana_ini = format!(
-                        "[server]\nhttp_port = 3000\n\n[security]\nadmin_user = {user}\nadmin_password = {pass}\n\n[users]\nallow_sign_up = false\n\n[auth.anonymous]\nenabled = true\norg_role = Viewer\n\n",
-                        user=g_user, pass=g_pass);
-
-                        let params = serde_json::json!({
-                            "cluster_name": cluster_name,
-                            "setup_grafana": true,
-                            "workspace": workspace,
-                            "node_ip": node_ip,
-                            "grafana_port": grafana_port,
-                            "greptimedb_port": greptimedb_port,
-                            "grafana_config": grafana_ini,
-                            // pass through greptime mysql creds if present
-                            "greptimedb_mysql_user": cluster_config.task_spec.monitoring.greptimedb.mysql_user.clone(),
-                            "greptimedb_mysql_password": cluster_config.task_spec.monitoring.greptimedb.mysql_password.clone(),
-                        });
-                        let params_b64 =
-                            base64::engine::general_purpose::STANDARD.encode(params.to_string());
-                        // Use command-mode agent to (re)configure datasource and dashboards
-                        if let Err(e) = handle_agent_command(Some(params_b64)).await {
-                            warn!("Post-update Grafana dashboard import failed: {}", e);
-                        } else {
-                            info!("Grafana dashboards re-imported");
-                        }
-                        Ok(())
-                    }
-                    Err(e) => {
-                        error!("Failed to deploy/update cluster {}: {}", cluster_name, e);
-                        Err(NokubeError::Deployment(format!("Deployment failed: {}", e)))
-                    }
-                }
+                // Summarise module states for logging
+                let module_summary = SERVICE_AGENT_MODULES
+                    .iter()
+                    .map(|module| {
+                        let state = status
+                            .modules
+                            .get(*module)
+                            .map(|m| format!("{:?}", m.state))
+                            .unwrap_or_else(|| "Pending".to_string());
+                        format!("{}={}", module, state)
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                iteration_summaries.push(format!("node={} {}", node.name, module_summary));
             }
-            Err(e) => {
-                error!("Failed to create deployment controller: {}", e);
-                Err(NokubeError::Deployment(format!(
-                    "Controller creation failed: {}",
-                    e
-                )))
+
+            if !iteration_summaries.is_empty() {
+                info!(
+                    "Service agent progress: {}",
+                    iteration_summaries.join(" | ")
+                );
             }
+
+            if all_ready {
+                info!(
+                    "All service agent modules reported success for deployment version {}",
+                    deployment_version
+                );
+                return Ok(());
+            }
+
+            if start.elapsed() > WAIT_TIMEOUT {
+                return Err(NokubeError::Deployment(format!(
+                    "Timed out waiting for service agent modules to become ready (deployment_version={})",
+                    deployment_version
+                )));
+            }
+
+            sleep(POLL_INTERVAL).await;
         }
     }
 
@@ -1070,24 +1162,29 @@ async fn main() -> Result<()> {
 
     async fn handle_agent_service(extra_params: Option<String>) -> Result<()> {
         info!("Starting agent service");
-        let cluster_name = extra_params
+        let parsed_params = extra_params.as_ref().and_then(|params_b64| {
+            base64::engine::general_purpose::STANDARD
+                .decode(params_b64)
+                .ok()
+                .and_then(|params_json| String::from_utf8(params_json).ok())
+                .and_then(|params_str| serde_json::from_str::<serde_json::Value>(&params_str).ok())
+        });
+
+        let cluster_name = parsed_params
             .as_ref()
-            .and_then(|params_b64| {
-                base64::engine::general_purpose::STANDARD
-                    .decode(params_b64)
-                    .ok()
-                    .and_then(|params_json| String::from_utf8(params_json).ok())
-                    .and_then(|params_str| {
-                        serde_json::from_str::<serde_json::Value>(&params_str).ok()
-                    })
-                    .and_then(|params| {
-                        params
-                            .get("cluster_name")
-                            .and_then(|v| v.as_str())
-                            .map(|s| s.to_string())
-                    })
-            })
+            .and_then(|params| params.get("cluster_name").and_then(|v| v.as_str()))
+            .map(|s| s.to_string())
             .unwrap_or_else(|| "default".to_string());
+
+        let deployment_version = parsed_params
+            .as_ref()
+            .and_then(|params| params.get("deployment_version").and_then(|v| v.as_str()))
+            .map(|s| s.to_string())
+            .ok_or_else(|| {
+                NokubeError::Config(
+                    "Missing deployment_version in agent-service extra_params".to_string(),
+                )
+            })?;
 
         let config_manager = ConfigManager::new().await.map_err(|e| {
             error!("Failed to create config manager: {}", e);
@@ -1146,6 +1243,7 @@ async fn main() -> Result<()> {
             cluster_name.to_string(),
             etcd_endpoints,
             cluster_config,
+            deployment_version,
         )
         .await?;
         service_agent.run().await.map_err(|e| {

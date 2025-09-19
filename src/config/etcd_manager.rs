@@ -3,6 +3,7 @@ use anyhow::Result;
 use etcd_rs::LeaseOp; // bring trait into scope for grant_lease()
 use etcd_rs::{
     Client, ClientConfig, DeleteRequest, Endpoint, KeyRange, KeyValueOp, PutRequest, RangeRequest,
+    TxnCmp, TxnRequest,
 };
 use serde_json;
 use tokio::time::{interval, Duration};
@@ -174,6 +175,29 @@ impl EtcdManager {
         let req = PutRequest::new(key, value);
         self.client.put(req).await?;
         Ok(())
+    }
+
+    pub async fn compare_and_swap(
+        &self,
+        key: &str,
+        expected_mod_revision: Option<i64>,
+        value: String,
+    ) -> Result<bool> {
+        let key_owned = key.to_string();
+        let key_range = KeyRange::key(key_owned.clone());
+        let mut txn = TxnRequest::new();
+
+        txn = match expected_mod_revision {
+            Some(revision) => {
+                txn.when_mod_revision(key_range.clone(), TxnCmp::Equal, revision as usize)
+            }
+            None => txn.when_version(key_range.clone(), TxnCmp::Equal, 0),
+        };
+
+        txn = txn.and_then(PutRequest::new(key_owned, value));
+
+        let resp = self.client.txn(txn).await?;
+        Ok(resp.succeeded)
     }
 
     /// 带租约的 PUT（使用 etcd lease 以便键自动过期）

@@ -164,9 +164,21 @@ impl Exporter {
         let metrics_collector = self.start_metrics_collection().await?;
         if let Some(events) = container_events {
             let event_listener = self.start_event_listener(events).await?;
-            tokio::try_join!(config_poller, metrics_collector, event_listener)?;
+            tokio::spawn(async move {
+                if let Err(e) = tokio::try_join!(config_poller, metrics_collector, event_listener) {
+                    tracing::error!("Exporter background tasks exited with error: {}", e);
+                } else {
+                    tracing::info!("Exporter background tasks completed");
+                }
+            });
         } else {
-            tokio::try_join!(config_poller, metrics_collector)?;
+            tokio::spawn(async move {
+                if let Err(e) = tokio::try_join!(config_poller, metrics_collector) {
+                    tracing::error!("Exporter background tasks exited with error: {}", e);
+                } else {
+                    tracing::info!("Exporter background tasks completed");
+                }
+            });
         }
         Ok(())
     }
