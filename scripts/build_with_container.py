@@ -9,6 +9,7 @@ import sys
 import subprocess
 import argparse
 from pathlib import Path
+from typing import Optional
 
 
 def sudo_prefix() -> list:
@@ -19,16 +20,30 @@ def sudo_prefix() -> list:
 def main():
     os.chdir(Path(__file__).absolute().parent)
     parser = argparse.ArgumentParser(description="Build with container and copy output")
-    parser.add_argument("--output-dir", "-o", default="../target", 
+    parser.add_argument("--output-dir", "-o", default="../target",
                        help="Output directory to copy the built binary (default: ../target)")
     parser.add_argument("--force-rebuild", "-f", action="store_true",
                        help="Force rebuild even if container is running")
+    parser.add_argument("--package", "-p", action="store_true",
+                       help="Also package into a single self-extracting file (.run)")
+    parser.add_argument("--package-out", default=None,
+                       help="Output path for packaged file (default: <output-dir>/<bin>.run)")
+    parser.add_argument("--include-glibc", action="store_true",
+                       help="Include core glibc in package (not recommended)")
+    parser.add_argument("--no-copy-libs", action="store_true",
+                       help="Skip copying shared libs separately when packaging")
     
     args = parser.parse_args()
     
     try:
         builder = ContainerBuilder(Path(__file__).absolute().parent.parent, args.output_dir)
-        builder.build_and_copy(force_rebuild=args.force_rebuild)
+        builder.build_and_copy(
+            force_rebuild=args.force_rebuild,
+            do_package=args.package,
+            package_out=args.package_out,
+            include_glibc=args.include_glibc,
+            copy_libs=not args.no_copy_libs,
+        )
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
@@ -143,8 +158,93 @@ class ContainerBuilder:
         except subprocess.CalledProcessError as e:
             print(f"Build failed: {e}")
             raise
+
+    def _host_to_container_output(self, host_path: Path) -> str:
+        """Map a host path inside self.output_dir to the /output mount inside container."""
+        try:
+            rel = host_path.resolve().relative_to(self.output_dir)
+            return f"/output/{rel}"
+        except Exception:
+            # Fallback to placing in /output root
+            return f"/output/{host_path.name}"
+
+    def _package_in_container(self, container_name: str, bin_name: str, out_host_path: Path, include_glibc: bool) -> None:
+        out_container = self._host_to_container_output(out_host_path)
+        include_flag = '1' if include_glibc else '0'
+        script = f"""
+set -euo pipefail
+BIN="/app/target/release/{bin_name}"
+STAGE=$(mktemp -d)
+mkdir -p "$STAGE/lib"
+cp -a "$BIN" "$STAGE/nokube"
+
+mapfile -t ALL_LIBS < <(ldd "$BIN" \
+  | sed -n 's/.*=> \\(\\/[^ ]*\\).*/\\1/p; s/^\\s*\\(\\/[^ ]*\\).*/\\1/p' \
+  | sort -u)
+
+GLIBC_BASENAMES=(
+  libc.so
+  libc.so.6
+  libpthread.so
+  libpthread.so.0
+  librt.so
+  librt.so.1
+  libdl.so
+  libdl.so.2
+  ld-linux-x86-64.so.2
+  ld-linux.so
+  ld-linux.so.2
+)
+
+copy_lib() {{
+  local src="$1"
+  local base
+  base=$(basename "$src")
+  if [[ {include_flag} -eq 0 ]]; then
+    for g in "${{GLIBC_BASENAMES[@]}}"; do
+      if [[ "$base" == "$g" ]]; then
+        echo "[skip] $base (glibc)"
+        return 0
+      fi
+    done
+  fi
+  if [[ -f "$src" ]]; then
+    echo "[copy] $src -> lib/$base"
+    cp -a "$src" "$STAGE/lib/$base"
+  else
+    echo "[warn] Not a regular file: $src" >&2
+  fi
+}}
+
+for lib in "${ALL_LIBS[@]}"; do
+  copy_lib "$lib"
+done
+
+cat > "$STAGE/stub.sh" << 'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+SELF="$0"
+START_LINE=$(awk '/^__NOKUBE_PAYLOAD_BELOW__/ {print NR + 1; exit}' "$SELF")
+TMPDIR="${TMPDIR:-/tmp}/nokube-$$"
+mkdir -p "$TMPDIR"
+trap 'rm -rf "$TMPDIR"' EXIT
+tail -n +"$START_LINE" "$SELF" | tar -xz -C "$TMPDIR"
+export LD_LIBRARY_PATH="$TMPDIR/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+exec "$TMPDIR/nokube" "$@"
+__NOKUBE_PAYLOAD_BELOW__
+STUB
+
+tar -C "$STAGE" -czf "$STAGE/payload.tar.gz" nokube lib
+cat "$STAGE/stub.sh" "$STAGE/payload.tar.gz" > "{out_container}"
+chmod +x "{out_container}"
+echo "[done] Single-file bundle created at: {out_container}"
+"""
+        cmd = sudo_prefix() + [
+            "docker", "exec", container_name, "bash", "-lc", script
+        ]
+        subprocess.run(cmd, check=True)
     
-    def _copy_binary_to_output(self, container_name: str) -> None:
+    def _copy_binary_to_output(self, container_name: str, copy_libs: bool = True) -> None:
         """Copy the built binary and required libraries to the output directory."""
         print("Copying binary and libraries to output directory...")
         
@@ -157,16 +257,16 @@ class ContainerBuilder:
                 "cp", f"/app/target/release/{binary_name}", f"/output/{binary_name}"
             ])
             print(f"Binary copied to: {self.output_dir}/{binary_name}")
-            
-            # Copy required SSL libraries
-            print("Copying SSL libraries...")
-            self._exec_in_container(container_name, [
-                "bash", "-c", "find /usr/lib/x86_64-linux-gnu -name 'libssl.so*' -exec cp {} /output/ \\;"
-            ])
-            self._exec_in_container(container_name, [
-                "bash", "-c", "find /usr/lib/x86_64-linux-gnu -name 'libcrypto.so*' -exec cp {} /output/ \\;"
-            ])
-            print("SSL libraries copied to output directory")
+            if copy_libs:
+                # Copy required SSL libraries
+                print("Copying SSL libraries...")
+                self._exec_in_container(container_name, [
+                    "bash", "-c", "find /usr/lib/x86_64-linux-gnu -name 'libssl.so*' -exec cp {} /output/ \\\\;"
+                ])
+                self._exec_in_container(container_name, [
+                    "bash", "-c", "find /usr/lib/x86_64-linux-gnu -name 'libcrypto.so*' -exec cp {} /output/ \\\\;"
+                ])
+                print("SSL libraries copied to output directory")
             
         except subprocess.CalledProcessError as e:
             print(f"Failed to copy binary or libraries: {e}")
@@ -201,7 +301,7 @@ class ContainerBuilder:
             return name.replace('-', '_')  # Default behavior for binary names
         return "app"  # fallback
     
-    def build_and_copy(self, force_rebuild: bool = False) -> None:
+    def build_and_copy(self, force_rebuild: bool = False, *, do_package: bool = False, package_out: 'Optional[str]' = None, include_glibc: bool = False, copy_libs: bool = True) -> None:
         """Main build and copy process."""
         # Ensure image exists
         image_name = self._ensure_image_exists()
@@ -229,10 +329,18 @@ class ContainerBuilder:
             # Build in container
             self._build_in_container(container_name)
             
-            # Copy binary to output
-            self._copy_binary_to_output(container_name)
+            # Copy binary to output (and optionally libs)
+            self._copy_binary_to_output(container_name, copy_libs=copy_libs)
+
+            # Optionally package into single-file .run inside container
+            if do_package:
+                bin_name = self._get_binary_name()
+                out_path = Path(package_out) if package_out else (self.output_dir / f"{bin_name}.run")
+                print("Packaging single-file bundle inside container...")
+                self._package_in_container(container_name, bin_name, out_path, include_glibc)
+                print(f"Packaged single-file: {out_path}")
             
-            print(f"Build and copy completed successfully!")
+            print("Build completed successfully!")
             print(f"Output binary: {self.output_dir}/{self._get_binary_name()}")
             
         except Exception as e:

@@ -576,7 +576,10 @@ isDefault = true
                             {"expr": "sum(last_over_time(nokube_node_mem_other_bytes[60s]))", "legendFormat": "Other Used", "intervalFactor": 1, "step": 30},
                             {"expr": "sum(last_over_time(nokube_node_mem_free_bytes[60s]))", "legendFormat": "Free", "intervalFactor": 1, "step": 30}
                         ],
-                        "yAxes": [{"label": "Bytes", "min": 0}, {"show": false}],
+                        "yaxes": [
+                            {"format": "bytes", "label": "Bytes", "min": 0, "show": true},
+                            {"show": false}
+                        ],
                         "lines": true, "fill": 4, "linewidth": 2, "pointradius": 2, "points": false, "renderer": "flot",
                         "seriesOverrides": [
                             {"alias": "Other Used", "color": "#F2495C"},
@@ -598,13 +601,9 @@ isDefault = true
                                 "step": 30
                             }
                         ],
-                        "yAxes": [
-                            {
-                                "label": "Bytes/sec"
-                            },
-                            {
-                                "show": false
-                            }
+                        "yaxes": [
+                            {"format": "Bps", "label": "Bytes/sec", "min": 0, "show": true},
+                            {"show": false}
                         ],
                         "lines": true,
                         "fill": 4,
@@ -632,13 +631,9 @@ isDefault = true
                                 "step": 30
                             }
                         ],
-                        "yAxes": [
-                            {
-                                "label": "Bytes/sec"
-                            },
-                            {
-                                "show": false
-                            }
+                        "yaxes": [
+                            {"format": "Bps", "label": "Bytes/sec", "min": 0, "show": true},
+                            {"show": false}
                         ],
                         "lines": true,
                         "fill": 2,
@@ -692,7 +687,10 @@ isDefault = true
                             {"expr": "last_over_time(nokube_node_mem_other_bytes{node=~\"${node:regex}\"}[60s])", "legendFormat": "Other Used", "intervalFactor": 1, "step": 30},
                             {"expr": "last_over_time(nokube_node_mem_free_bytes{node=~\"${node:regex}\"}[60s])", "legendFormat": "Free", "intervalFactor": 1, "step": 30}
                         ],
-                        "yAxes": [{"label": "Bytes", "min": 0}, {"show": false}],
+                        "yaxes": [
+                            {"format": "bytes", "label": "Bytes", "min": 0, "show": true},
+                            {"show": false}
+                        ],
                         "lines": true, "fill": 2, "linewidth": 2, "pointradius": 2, "points": false, "renderer": "flot",
                         "seriesOverrides": [
                             {"alias": "Other Used", "color": "#F2495C"},
