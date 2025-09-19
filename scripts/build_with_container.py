@@ -64,7 +64,7 @@ class ContainerBuilder:
         try:
             # Run without capturing output for real-time progress
             subprocess.run([
-                "python3", "prepare_build_img.py"
+                sys.executable, "prepare_build_img.py"
             ], cwd=self.scripts_dir, check=True)
             
             # Since we're not capturing output, need to find the image directly
@@ -171,9 +171,10 @@ class ContainerBuilder:
     def _package_in_container(self, container_name: str, bin_name: str, out_host_path: Path, include_glibc: bool) -> None:
         out_container = self._host_to_container_output(out_host_path)
         include_flag = '1' if include_glibc else '0'
-        script = f"""
+        # Build the bash script without using f-strings to avoid brace interpolation issues
+        script = """
 set -euo pipefail
-BIN="/app/target/release/{bin_name}"
+BIN="/app/target/release/__BIN_NAME__"
 STAGE=$(mktemp -d)
 mkdir -p "$STAGE/lib"
 cp -a "$BIN" "$STAGE/nokube"
@@ -196,12 +197,12 @@ GLIBC_BASENAMES=(
   ld-linux.so.2
 )
 
-copy_lib() {{
+copy_lib() {
   local src="$1"
   local base
   base=$(basename "$src")
-  if [[ {include_flag} -eq 0 ]]; then
-    for g in "${{GLIBC_BASENAMES[@]}}"; do
+  if [[ __INCLUDE_FLAG__ -eq 0 ]]; then
+    for g in "${GLIBC_BASENAMES[@]}"; do
       if [[ "$base" == "$g" ]]; then
         echo "[skip] $base (glibc)"
         return 0
@@ -214,7 +215,7 @@ copy_lib() {{
   else
     echo "[warn] Not a regular file: $src" >&2
   fi
-}}
+}
 
 for lib in "${ALL_LIBS[@]}"; do
   copy_lib "$lib"
@@ -235,10 +236,15 @@ __NOKUBE_PAYLOAD_BELOW__
 STUB
 
 tar -C "$STAGE" -czf "$STAGE/payload.tar.gz" nokube lib
-cat "$STAGE/stub.sh" "$STAGE/payload.tar.gz" > "{out_container}"
-chmod +x "{out_container}"
-echo "[done] Single-file bundle created at: {out_container}"
+cat "$STAGE/stub.sh" "$STAGE/payload.tar.gz" > "__OUT_CONTAINER__"
+chmod +x "__OUT_CONTAINER__"
+echo "[done] Single-file bundle created at: __OUT_CONTAINER__"
 """
+        script = (script
+                  .replace("__BIN_NAME__", bin_name)
+                  .replace("__OUT_CONTAINER__", out_container)
+                  .replace("__INCLUDE_FLAG__", include_flag))
+
         cmd = sudo_prefix() + [
             "docker", "exec", container_name, "bash", "-lc", script
         ]

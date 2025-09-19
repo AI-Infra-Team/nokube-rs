@@ -1,0 +1,8 @@
+build-essential
+pkg-config
+libssl-dev
+libssh2-1-dev
+zlib1g-dev
+protobuf-compiler
+cmake
+curl
