@@ -52,7 +52,12 @@ def main():
 class ContainerBuilder:
     def __init__(self, project_dir: str, output_dir: str):
         self.project_dir = Path(project_dir).resolve()
-        self.output_dir = Path(output_dir).resolve()
+        # Resolve output_dir relative to the project root (not CWD)
+        output_dir_path = Path(output_dir)
+        if not output_dir_path.is_absolute():
+            self.output_dir = (self.project_dir / output_dir_path).resolve()
+        else:
+            self.output_dir = output_dir_path.resolve()
         self.scripts_dir = self.project_dir / "scripts"
         
         # Ensure output directory exists
@@ -64,7 +69,7 @@ class ContainerBuilder:
         try:
             # Run without capturing output for real-time progress
             subprocess.run([
-                "python3", "prepare_build_img.py"
+                sys.executable, "prepare_build_img.py"
             ], cwd=self.scripts_dir, check=True)
             
             # Since we're not capturing output, need to find the image directly
@@ -171,9 +176,10 @@ class ContainerBuilder:
     def _package_in_container(self, container_name: str, bin_name: str, out_host_path: Path, include_glibc: bool) -> None:
         out_container = self._host_to_container_output(out_host_path)
         include_flag = '1' if include_glibc else '0'
-        script = f"""
+        # Build the bash script without using f-strings to avoid brace interpolation issues
+        script = """
 set -euo pipefail
-BIN="/app/target/release/{bin_name}"
+BIN="/app/target/release/__BIN_NAME__"
 STAGE=$(mktemp -d)
 mkdir -p "$STAGE/lib"
 cp -a "$BIN" "$STAGE/nokube"
@@ -196,12 +202,12 @@ GLIBC_BASENAMES=(
   ld-linux.so.2
 )
 
-copy_lib() {{
+copy_lib() {
   local src="$1"
   local base
   base=$(basename "$src")
-  if [[ {include_flag} -eq 0 ]]; then
-    for g in "${{GLIBC_BASENAMES[@]}}"; do
+  if [[ __INCLUDE_FLAG__ -eq 0 ]]; then
+    for g in "${GLIBC_BASENAMES[@]}"; do
       if [[ "$base" == "$g" ]]; then
         echo "[skip] $base (glibc)"
         return 0
@@ -214,7 +220,7 @@ copy_lib() {{
   else
     echo "[warn] Not a regular file: $src" >&2
   fi
-}}
+}
 
 for lib in "${ALL_LIBS[@]}"; do
   copy_lib "$lib"
@@ -235,10 +241,15 @@ __NOKUBE_PAYLOAD_BELOW__
 STUB
 
 tar -C "$STAGE" -czf "$STAGE/payload.tar.gz" nokube lib
-cat "$STAGE/stub.sh" "$STAGE/payload.tar.gz" > "{out_container}"
-chmod +x "{out_container}"
-echo "[done] Single-file bundle created at: {out_container}"
+cat "$STAGE/stub.sh" "$STAGE/payload.tar.gz" > "__OUT_CONTAINER__"
+chmod +x "__OUT_CONTAINER__"
+echo "[done] Single-file bundle created at: __OUT_CONTAINER__"
 """
+        script = (script
+                  .replace("__BIN_NAME__", bin_name)
+                  .replace("__OUT_CONTAINER__", out_container)
+                  .replace("__INCLUDE_FLAG__", include_flag))
+
         cmd = sudo_prefix() + [
             "docker", "exec", container_name, "bash", "-lc", script
         ]
@@ -258,15 +269,33 @@ echo "[done] Single-file bundle created at: {out_container}"
             ])
             print(f"Binary copied to: {self.output_dir}/{binary_name}")
             if copy_libs:
-                # Copy required SSL libraries
+                # Copy required SSL libraries (robust across distro variants)
                 print("Copying SSL libraries...")
+                copy_script = r'''
+set -euo pipefail
+shopt -s nullglob
+dest=/output
+dirs=(/usr/lib/x86_64-linux-gnu /lib/x86_64-linux-gnu /usr/lib64 /lib64)
+
+copied=0
+for d in "${dirs[@]}"; do
+  for f in "$d"/libssl.so* "$d"/libcrypto.so*; do
+    if [ -f "$f" ]; then
+      echo "[copy] $f -> $dest/$(basename "$f")"
+      cp -a "$f" "$dest/" || true
+      copied=1
+    fi
+  done
+done
+
+if [ "$copied" -eq 0 ]; then
+  echo "[warn] No libssl/libcrypto found to copy; continuing."
+fi
+'''
                 self._exec_in_container(container_name, [
-                    "bash", "-c", "find /usr/lib/x86_64-linux-gnu -name 'libssl.so*' -exec cp {} /output/ \\\\;"
+                    "bash", "-lc", copy_script
                 ])
-                self._exec_in_container(container_name, [
-                    "bash", "-c", "find /usr/lib/x86_64-linux-gnu -name 'libcrypto.so*' -exec cp {} /output/ \\\\;"
-                ])
-                print("SSL libraries copied to output directory")
+                print("SSL libraries copy step finished")
             
         except subprocess.CalledProcessError as e:
             print(f"Failed to copy binary or libraries: {e}")
@@ -335,7 +364,12 @@ echo "[done] Single-file bundle created at: {out_container}"
             # Optionally package into single-file .run inside container
             if do_package:
                 bin_name = self._get_binary_name()
-                out_path = Path(package_out) if package_out else (self.output_dir / f"{bin_name}.run")
+                # Resolve package_out relative to project root when provided
+                if package_out:
+                    pkg_path = Path(package_out)
+                    out_path = (self.project_dir / pkg_path).resolve() if not pkg_path.is_absolute() else pkg_path.resolve()
+                else:
+                    out_path = (self.output_dir / f"{bin_name}.run")
                 print("Packaging single-file bundle inside container...")
                 self._package_in_container(container_name, bin_name, out_path, include_glibc)
                 print(f"Packaged single-file: {out_path}")

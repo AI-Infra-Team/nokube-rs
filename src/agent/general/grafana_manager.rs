@@ -1071,11 +1071,20 @@ isDefault = true
                             "current": {"text": "", "value": "${cluster:regex}"}
                         },
                         {
+                            "name": "alive_window",
+                            "type": "constant",
+                            "label": "Alive Window",
+                            "query": "2m",
+                            "hide": 0,
+                            "skipUrlSync": false,
+                            "current": {"text": "2m", "value": "2m"}
+                        },
+                        {
                             "name": "root_actor",
                             "type": "query",
                             "label": "Root Actor",
                             "datasource": "GreptimeDB",
-                            "query": "query_result(last_over_time(nokube_actor_status{cluster_name=~\"${cluster:regex}\", actor_level=\"root\", canonical=\"1\"}[30s]) > 0)",
+                            "query": "query_result(last_over_time(nokube_actor_status{cluster_name=~\"${cluster:regex}\", actor_level=\"root\", canonical=\"1\"}[${alive_window}]) > 0)",
                             "refresh": 1,
                             "includeAll": false,
                             "multi": true,
@@ -1096,7 +1105,7 @@ isDefault = true
                             "type": "query",
                             "label": "Container",
                             "datasource": "GreptimeDB",
-                            "query": "query_result(last_over_time(nokube_actor_status{cluster_name=~\"${cluster:regex}\", actor_level=\"pod\", root_actor=~\"${root_actor:regex}\", canonical=\"1\"}[30s]) > 0)",
+                            "query": "query_result(last_over_time(nokube_actor_status{cluster_name=~\"${cluster:regex}\", actor_level=\"pod\", root_actor=~\"${root_actor:regex}\", canonical=\"1\"}[${alive_window}]) > 0)",
                             "refresh": 1,
                             "includeAll": true,
                             "allValue": ".*",
@@ -1113,7 +1122,7 @@ isDefault = true
                             "skipUrlSync": true,
                             "current": {"text": "", "value": "${container:regex}"}
                         },
-                        {"name": "node", "type": "query", "label": "Node", "datasource": "GreptimeDB", "query": "query_result(last_over_time(nokube_actor_status{cluster_name=~\"${cluster:regex}\", actor_level=\"pod\", root_actor=~\"${root_actor:regex}\", container=~\"${container:regex}\", canonical=\"1\"}[30s]) > 0)", "refresh": 1, "includeAll": true, "allValue": ".*", "multi": true, "current": {"text": "All", "value": ["$__all"]}, "regex": "/node=\"([^\"]+)\"/"},
+                        {"name": "node", "type": "query", "label": "Node", "datasource": "GreptimeDB", "query": "query_result(last_over_time(nokube_actor_status{cluster_name=~\"${cluster:regex}\", actor_level=\"pod\", root_actor=~\"${root_actor:regex}\", container=~\"${container:regex}\", canonical=\"1\"}[${alive_window}]) > 0)", "refresh": 1, "includeAll": true, "allValue": ".*", "multi": true, "current": {"text": "All", "value": ["$__all"]}, "regex": "/node=\"([^\"]+)\"/"},
                         {"name": "node_filter", "type": "constant", "label": "", "query": "${node:regex}", "hide": 2, "skipUrlSync": true, "current": {"text": "", "value": "${node:regex}"}}
                     ]
                 },
@@ -1148,7 +1157,7 @@ isDefault = true
                         "type": "stat",
                         "datasource": "GreptimeDB",
                         "targets": [
-                            {"expr": "count(count by (pod, container) (last_over_time(nokube_actor_status{cluster_name=~\"${cluster_filter}\", actor_level=\"pod\", root_actor=~\"${root_actor_filter}\", container=~\"${container_filter}\", canonical=\"1\"}[30s]) > bool 0))", "instant": true}
+                            {"expr": "count(count by (pod, container) (last_over_time(nokube_actor_status{cluster_name=~\"${cluster_filter}\", actor_level=\"pod\", root_actor=~\"${root_actor_filter}\", container=~\"${container_filter}\", canonical=\"1\"}[${alive_window}]) > bool 0))", "instant": true}
                         ],
                         "gridPos": {"h": 4, "w": 24, "x": 0, "y": 4}
                     },
@@ -1168,7 +1177,7 @@ isDefault = true
                         "type": "table",
                         "datasource": "GreptimeDB",
                         "targets": [
-                            {"expr": "sum by (pod, node) (nokube_container_mem_bytes{cluster_name=~\"${cluster_filter}\", root_actor=~\"${root_actor_filter}\", container=~\"${container_filter}\"} * on (cluster_name, root_actor, pod, container, node) group_left() (last_over_time(nokube_actor_status{cluster_name=~\"${cluster_filter}\", actor_level=\"pod\", root_actor=~\"${root_actor_filter}\", container=~\"${container_filter}\", canonical=\"1\"}[30s]) > bool 0))", "format": "table", "instant": true}
+                            {"expr": "sum by (pod, node) (nokube_container_mem_bytes{cluster_name=~\"${cluster_filter}\", root_actor=~\"${root_actor_filter}\", container=~\"${container_filter}\"} * on (cluster_name, root_actor, pod, container, node) group_left() (last_over_time(nokube_actor_status{cluster_name=~\"${cluster_filter}\", actor_level=\"pod\", root_actor=~\"${root_actor_filter}\", container=~\"${container_filter}\", canonical=\"1\"}[${alive_window}]) > bool 0))", "format": "table", "instant": true}
                         ],
                         "transformations": [
                             {"id": "labelsToFields", "options": {"mode": "columns"}},
@@ -1182,7 +1191,7 @@ isDefault = true
                         "type": "table",
                         "datasource": "GreptimeDB",
                         "targets": [
-                            {"expr": "nokube_container_mem_bytes{cluster_name=~\"${cluster_filter}\", root_actor=~\"${root_actor_filter}\", container=~\"${container_filter}\"} * on (cluster_name, root_actor, pod, container, node) group_left() (last_over_time(nokube_actor_status{cluster_name=~\"${cluster_filter}\", actor_level=\"pod\", root_actor=~\"${root_actor_filter}\", container=~\"${container_filter}\", canonical=\"1\"}[30s]) > bool 0)", "format": "table", "instant": true}
+                            {"expr": "nokube_container_mem_bytes{cluster_name=~\"${cluster_filter}\", root_actor=~\"${root_actor_filter}\", container=~\"${container_filter}\"} * on (cluster_name, root_actor, pod, container, node) group_left() (last_over_time(nokube_actor_status{cluster_name=~\"${cluster_filter}\", actor_level=\"pod\", root_actor=~\"${root_actor_filter}\", container=~\"${container_filter}\", canonical=\"1\"}[${alive_window}]) > bool 0)", "format": "table", "instant": true}
                         ],
                         "transformations": [
                             {"id": "labelsToFields", "options": {"mode": "columns"}},
@@ -1212,7 +1221,7 @@ isDefault = true
                         "type": "timeseries",
                         "datasource": "GreptimeDB",
                         "targets": [
-                            {"expr": "sum by (pod, container, node) (nokube_container_cpu_cores{cluster_name=~\"${cluster_filter}\", root_actor=~\"${root_actor_filter}\", container=~\"${container_filter}\"} * on (cluster_name, root_actor, pod, container, node) group_left() (last_over_time(nokube_actor_status{cluster_name=~\"${cluster_filter}\", actor_level=\"pod\", root_actor=~\"${root_actor_filter}\", container=~\"${container_filter}\", canonical=\"1\"}[30s]) > bool 0))", "legendFormat": "{{pod}}/{{container}} @ {{node}}"}
+                            {"expr": "sum by (pod, container, node) (nokube_container_cpu_cores{cluster_name=~\"${cluster_filter}\", root_actor=~\"${root_actor_filter}\", container=~\"${container_filter}\"} * on (cluster_name, root_actor, pod, container, node) group_left() (last_over_time(nokube_actor_status{cluster_name=~\"${cluster_filter}\", actor_level=\"pod\", root_actor=~\"${root_actor_filter}\", container=~\"${container_filter}\", canonical=\"1\"}[${alive_window}]) > bool 0))", "legendFormat": "{{pod}}/{{container}} @ {{node}}"}
                         ],
                         "fieldConfig": {"defaults": {"unit": "cores", "min": 0, "custom": {"stacking": {"mode": "none"}}}},
                         "gridPos": {"h": 8, "w": 12, "x": 0, "y": 25}
@@ -1223,7 +1232,7 @@ isDefault = true
                         "type": "timeseries",
                         "datasource": "GreptimeDB",
                                 "targets": [
-                            {"expr": "sum by (pod, container, node) (nokube_container_mem_bytes{cluster_name=~\"${cluster_filter}\", root_actor=~\"${root_actor_filter}\", container=~\"${container_filter}\"} * on (cluster_name, root_actor, pod, container, node) group_left() (last_over_time(nokube_actor_status{cluster_name=~\"${cluster_filter}\", actor_level=\"pod\", root_actor=~\"${root_actor_filter}\", container=~\"${container_filter}\", canonical=\"1\"}[30s]) > bool 0))", "legendFormat": "{{pod}}/{{container}} @ {{node}}"},
+                            {"expr": "sum by (pod, container, node) (nokube_container_mem_bytes{cluster_name=~\"${cluster_filter}\", root_actor=~\"${root_actor_filter}\", container=~\"${container_filter}\"} * on (cluster_name, root_actor, pod, container, node) group_left() (last_over_time(nokube_actor_status{cluster_name=~\"${cluster_filter}\", actor_level=\"pod\", root_actor=~\"${root_actor_filter}\", container=~\"${container_filter}\", canonical=\"1\"}[${alive_window}]) > bool 0))", "legendFormat": "{{pod}}/{{container}} @ {{node}}"},
                             {"expr": "nokube_memory_used_bytes{cluster_name=~\"${cluster_filter}\", node=~\"${node_filter}\"}", "legendFormat": "Node Used: {{node}}"},
                             {"expr": "nokube_memory_total_bytes{cluster_name=~\"${cluster_filter}\", node=~\"${node_filter}\"}", "legendFormat": "Node Total: {{node}}"}
                         ],

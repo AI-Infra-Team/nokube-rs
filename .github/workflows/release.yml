@@ -33,7 +33,7 @@ jobs:
       - name: Install Python deps
         run: |
           python -m pip install --upgrade pip
-          pip install requests tomli
+          pip install -r scripts/requirements-ci.txt
 
       - name: Read version from Cargo.toml
         id: ver
@@ -79,14 +79,13 @@ jobs:
       - name: Install Python deps
         run: |
           python -m pip install --upgrade pip
-          pip install requests
+          pip install -r scripts/requirements-ci.txt
 
       - name: Build and package (x86_64 via container)
         if: matrix.arch == 'x86_64'
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential pkg-config libssl-dev libssh2-1-dev zlib1g-dev protobuf-compiler cmake
+          xargs -a scripts/apt-packages-ci.txt -r sudo apt-get install -y --no-install-recommends
           docker --version
           sudo systemctl is-active --quiet docker || true
           python3 scripts/build_with_container.py -o dist -p --package-out dist/nokube-${{ env.RELEASE_TAG }}-linux-x86_64.run --no-copy-libs
@@ -98,20 +97,36 @@ jobs:
         with:
           arch: aarch64
           distro: ubuntu22.04
+          base_image: ubuntu:22.04
           githubToken: ${{ github.token }}
+          dockerRunArgs: |
+            -v ${{ github.workspace }}:/github/workspace
           install: |
+            set -euo pipefail
             apt-get update
-            apt-get install -y curl build-essential pkg-config libssl-dev libssh2-1-dev zlib1g-dev protobuf-compiler cmake
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.86.0
+            # Inline apt packages (cannot access /github/workspace during image build)
+            DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+              build-essential pkg-config libssl-dev libssh2-1-dev zlib1g-dev protobuf-compiler cmake curl ca-certificates git
+            # Install rustup with default toolchain; select exact toolchain later at runtime
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
             . /root/.cargo/env
-            rustup component add rustfmt clippy
+            rustup --version || true
           run: |
             set -euo pipefail
             . /root/.cargo/env
+            # The action automatically mounts the repo to /github/workspace and cd's there.
+            # Select toolchain from repository config
+            if [[ -f rust-toolchain.toml ]]; then
+              TOOLCHAIN=$(sed -n 's/^channel\s*=\s*"\([^"]*\)"/\1/p' rust-toolchain.toml || true)
+              if [[ -n "${TOOLCHAIN:-}" ]]; then
+                rustup toolchain install "$TOOLCHAIN"
+                rustup default "$TOOLCHAIN"
+              fi
+            fi
+            rustup component add rustfmt clippy || true
             rustc --version
             cargo --version
             # Build
-            cd /github/workspace
             cargo build --release
             mkdir -p dist
             cp target/release/nokube dist/nokube-${{ env.RELEASE_TAG }}-linux-arm64
